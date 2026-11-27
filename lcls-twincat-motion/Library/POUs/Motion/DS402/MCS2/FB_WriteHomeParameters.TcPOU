@@ -1,11 +1,27 @@
 ﻿<?xml version="1.0" encoding="utf-8"?>
 <TcPlcObject Version="1.1.0.1">
   <POU Name="FB_WriteHomeParameters" Id="{e85d8b4a-38f0-4a4c-8985-f84fb315cac2}" SpecialFunc="None">
-    <Declaration><![CDATA[// The SDO writes can be done sequentially at boot or on demand during normal use.
+    <Declaration><![CDATA[// Purpose: write the MCS2 homing parameters (search/sync velocity,
+// acceleration, offset and referencing options) to the drive over CoE SDO.
+//
+// Usage: enable the block with bEnable. The SDO writes run sequentially at boot
+// and are repeated on demand whenever a setpoint differs from the value last
+// written. A fault from any SDO write latches nHomingStep = ERROR together with
+// stMotionStage.bError and stMotionStage.nErrorId. The latch is cleared only on
+// the rising edge of bErrorAcknowledge (wire it to stMotionStage.bReset);
+// dropping bEnable or cycling the startup timer does not clear it.
+//
+// Objectives: never overlap CoE mailbox requests, and keep an SDO fault
+// diagnosable and recoverable without a restart or an online write.
+//
+// History:
+// 2026-11-27, Lasse Numminen: add the bErrorAcknowledge input and latch ERROR
+// until the caller acknowledges it.
 // Set bForceSequentialSDOs TRUE (debug) to enforce sequential behavior at any time.
 FUNCTION_BLOCK FB_WriteHomeParameters
 VAR_INPUT
-    bEnable : BOOL;
+    bEnable             : BOOL; // TRUE to run the homing parameter writing sequence
+    bErrorAcknowledge   : BOOL; // Rising edge clears a latched SDO fault (wire to stMotionStage.bReset)
 END_VAR
 VAR_IN_OUT
     stDS402Drive         : ST_DS402Drive;
@@ -53,7 +69,7 @@ VAR
     {attribute 'hide'}
     nHomeOffs                   : DINT;
     tonStartUp : TON;
-    bErrorAcknowledge: BOOL;
+    rtErrorAcknowledge : R_TRIG; // rising-edge detector for bErrorAcknowledge
 END_VAR
 ]]></Declaration>
     <Implementation>
@@ -69,15 +85,23 @@ IF bEnable THEN
         PT := T#4S
     );
 
-    IF NOT tonStartUp.Q AND nHomingStep <> IDLE AND NOT bForceSequentialSDOs THEN
+    // The startup delay may only (re)arm the sweep: a latched ERROR is cleared
+    // exclusively by bErrorAcknowledge below, never by cycling the enable or by
+    // the startup timer.
+    IF NOT tonStartUp.Q AND nHomingStep <> IDLE AND nHomingStep <> ERROR AND NOT bForceSequentialSDOs THEN
         nHomingStep := IDLE;
     END_IF
 
-    IF nHomingStep = ERROR AND bErrorAcknowledge THEN
+    // Fault acknowledge: rising edge only, and only from the latched ERROR state,
+    // in which this block commands no SDO write - a known-safe point to restart
+    // the sweep from. A held-ON acknowledge therefore cannot mask the next fault,
+    // and the acknowledge is never gated on live writer activity, so a stuck
+    // mailbox cannot leave the fault unrecoverable.
+    rtErrorAcknowledge(CLK := bErrorAcknowledge);
+    IF rtErrorAcknowledge.Q AND nHomingStep = ERROR THEN
         nHomingStep            := IDLE;
         stMotionStage.bError   := FALSE;
         stMotionStage.nErrorId := 0;
-        bErrorAcknowledge      := FALSE;
     END_IF
 
     ScaleHomingParams();
