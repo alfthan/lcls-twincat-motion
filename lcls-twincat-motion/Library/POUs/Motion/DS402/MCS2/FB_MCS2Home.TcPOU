@@ -21,6 +21,9 @@ VAR
     bReset :  BOOL;
     {attribute 'hide'}
     bHalt : BOOL;
+    // TRUE for the first cycle only: de-energises the drive command bits
+    // before any move can be commanded (see the start-up block below).
+    bFirstScan           : BOOL := TRUE;
     {attribute 'hide'}
     tonSettlingTime     : TON;
     {attribute 'hide'}
@@ -34,10 +37,30 @@ END_VAR
    RETURN;
 END_IF
 
+(*
+    Drive command bits (DS402 control word):
+        bit 3 = enable operation, bit 4 = op-mode specific (homing) start.
+    Both are driven FALSE on the first scan and in every state that does not
+    actively command the move, so a fault, an abort or an idle cycle can never
+    leave the drive enabled or a command latched on.
+*)
+IF bFirstScan THEN
+    bFirstScan := FALSE;
+    stDS402Drive.nDriveControl.3 := FALSE;
+    stDS402Drive.nDriveControl.4 := FALSE;
+END_IF
+
 rtHomeMove(CLK := bExecute);
 
 CASE eStepState OF
     E_MoveState.IDLING:
+        // Idle: this block commands nothing, so the op-mode specific start bit
+        // is held cleared. Bit 3 (enable operation) is cleared on every entry
+        // into IDLING (DONE/INTERRUPTED/ERROR) and is deliberately
+        // left alone here: between moves the drive manager's DS402 start-up
+        // sequence owns the control word and re-enables the drive for the next
+        // move, so holding it low would defeat that handshake.
+        stDS402Drive.nDriveControl.4 := FALSE;
         IF rtHomeMove.Q THEN
             bHomeMoveBusy := TRUE;
             bHomeMoveDone := FALSE;
@@ -72,10 +95,16 @@ CASE eStepState OF
     E_MoveState.IN_PROGRESS:
         IF bHalt THEN
             bHomeMoveAborted := TRUE;
+            // Abort: de-energise in this cycle, not only on the next scan.
+            stDS402Drive.nDriveControl.3 := FALSE;
+            stDS402Drive.nDriveControl.4 := FALSE;
             eStepState := E_MoveState.INTERRUPTED;
         ELSIF stDS402Drive.stDriveStatus.Bit13_OpModeSpecific
            OR stDS402Drive.stDriveStatus.WarningCondition THEN
             stMotionStage.bError := TRUE;
+            // Fault: de-energise in this cycle, not only on the next scan.
+            stDS402Drive.nDriveControl.3 := FALSE;
+            stDS402Drive.nDriveControl.4 := FALSE;
             eStepState := E_MoveState.ERROR;
         ELSIF tonSettlingTime.Q AND stDS402Drive.stDriveStatus.TargetReached
            AND stDS402Drive.stDriveStatus.Bit12_OpModeSpecific
@@ -84,6 +113,8 @@ CASE eStepState OF
         END_IF
 
     E_MoveState.INTERRUPTED:
+        // Aborted: no drive command bit may stay asserted.
+        stDS402Drive.nDriveControl.3 := FALSE;
         stDS402Drive.nDriveControl.4 := FALSE;
         bHomeMoveBusy := FALSE;
         eStepState := E_MoveState.IDLING;
@@ -94,6 +125,10 @@ CASE eStepState OF
         // built up during the drive-side move is cleared before homing reports
         // done. The caller re-enables position-lag monitoring and returns to CSP
         // on that done edge, so reporting early trips a following error.
+
+        // Homing no longer commands the drive: drop the start bit. Bit 3 is
+        // left asserted until the block returns to IDLING so the drive keeps
+        // reporting the encoder count this position sync is based on.
         stDS402Drive.nDriveControl.4 := FALSE;
         fbSetPos(
             Axis := stMotionStage.Axis,
@@ -106,6 +141,10 @@ CASE eStepState OF
             fbSetPos(Axis := stMotionStage.Axis, Execute := FALSE);
             bHomeMoveBusy := FALSE;
             bHomeMoveDone := TRUE;
+            // Homing acknowledged: leave no command bit asserted and the drive
+            // de-energised until the next move enables it again.
+            stDS402Drive.nDriveControl.3 := FALSE;
+            stDS402Drive.nDriveControl.4 := FALSE;
             eStepState := E_MoveState.IDLING;
         ELSIF fbSetPos.Error THEN
             fbSetPos(Axis := stMotionStage.Axis, Execute := FALSE);
@@ -115,6 +154,9 @@ CASE eStepState OF
         END_IF
 
     E_MoveState.ERROR:
+        // Faulted: hold the drive de-energised for as long as the fault lasts.
+        stDS402Drive.nDriveControl.3 := FALSE;
+        stDS402Drive.nDriveControl.4 := FALSE;
         bHomeMoveDone := FALSE;
         bHomeMoveBusy := FALSE;
         IF NOT stMotionStage.bError THEN

@@ -19,6 +19,9 @@ VAR
     eStepState           : E_MoveState := E_MoveState.IDLING;
     bReset :  BOOL;
     bHalt : BOOL;
+    // TRUE for the first cycle only: de-energises the drive command bits
+    // before any move can be commanded (see the start-up block below).
+    bFirstScan           : BOOL := TRUE;
     tonSettlingTime     : TON;
     {attribute 'hide'}
     rtStepMove               : R_TRIG;
@@ -30,10 +33,30 @@ END_VAR
    RETURN;
 END_IF
 
+(*
+    Drive command bits (DS402 control word):
+        bit 3 = enable operation, bit 4 = op-mode specific (step) start.
+    Both are driven FALSE on the first scan and in every state that does not
+    actively command the move, so a fault, an abort or an idle cycle can never
+    leave the drive enabled or a step command latched on.
+*)
+IF bFirstScan THEN
+    bFirstScan := FALSE;
+    stDS402Drive.nDriveControl.3 := FALSE;
+    stDS402Drive.nDriveControl.4 := FALSE;
+END_IF
+
 rtStepMove(CLK := bExecute);
 
 CASE eStepState OF
     E_MoveState.IDLING:
+        // Idle: this block commands nothing, so the op-mode specific start bit
+        // is held cleared. Bit 3 (enable operation) is cleared on every entry
+        // into IDLING (DONE/INTERRUPTED/ERROR) and is deliberately
+        // left alone here: between moves the drive manager's DS402 start-up
+        // sequence owns the control word and re-enables the drive for the next
+        // move, so holding it low would defeat that handshake.
+        stDS402Drive.nDriveControl.4 := FALSE;
         IF rtStepMove.Q THEN
             bStepMoveBusy := TRUE;
             bStepMoveDone := FALSE;
@@ -55,9 +78,15 @@ CASE eStepState OF
     E_MoveState.IN_PROGRESS:
         IF bHalt OR bReset THEN
             bStepMoveAborted := TRUE;
+            // Abort: de-energise in this cycle, not only on the next scan.
+            stDS402Drive.nDriveControl.3 := FALSE;
+            stDS402Drive.nDriveControl.4 := FALSE;
             eStepState := E_MoveState.INTERRUPTED;
         ELSIF stDS402Drive.stDriveStatus.Bit13_OpModeSpecific THEN
             stMotionStage.bError := TRUE;
+            // Fault: de-energise in this cycle, not only on the next scan.
+            stDS402Drive.nDriveControl.3 := FALSE;
+            stDS402Drive.nDriveControl.4 := FALSE;
             eStepState := E_MoveState.ERROR;
         ELSE
             IF tonSettlingTime.Q AND stDS402Drive.stDriveStatus.TargetReached THEN
@@ -66,6 +95,8 @@ CASE eStepState OF
         END_IF
 
     E_MoveState.INTERRUPTED:
+        // Aborted: no drive command bit may stay asserted.
+        stDS402Drive.nDriveControl.3 := FALSE;
         stDS402Drive.nDriveControl.4 := FALSE;
         bStepMoveBusy := FALSE;
         eStepState := E_MoveState.IDLING;
@@ -73,15 +104,24 @@ CASE eStepState OF
     E_MoveState.REACHED:
         bStepMoveBusy := FALSE;
         bStepMoveDone := TRUE;
+        // Target reached: the step is no longer commanded, drop the start bit;
+        // bit 3 is dropped on the way back to IDLING.
         stDS402Drive.nDriveControl.4 := FALSE;
         eStepState := E_MoveState.DONE;
 
     E_MoveState.DONE:
         IF stMotionStage.bDone THEN
+            // Move acknowledged: leave no command bit asserted and the drive
+            // de-energised until the next move enables it again.
+            stDS402Drive.nDriveControl.3 := FALSE;
+            stDS402Drive.nDriveControl.4 := FALSE;
             eStepState := E_MoveState.IDLING;
         END_IF
 
     E_MoveState.ERROR:
+        // Faulted: hold the drive de-energised for as long as the fault lasts.
+        stDS402Drive.nDriveControl.3 := FALSE;
+        stDS402Drive.nDriveControl.4 := FALSE;
         bStepMoveBusy := FALSE;
         bStepMoveDone := FALSE;
         IF NOT stMotionStage.bError THEN

@@ -1,0 +1,195 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="FB_MCS2StepMode_Test" Id="{b1c0a000-0000-4000-8000-000000000001}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+    Unit tests for the FB_MCS2StepMode safe-state handling.
+    Verifies that the DS402 drive command bits (control word bit 3 = enable
+    operation, bit 4 = op-mode specific step start) are de-asserted on the first
+    scan, that a fault or an abort de-energises the drive in the same cycle, and
+    that the block leaves the drive de-energised when it returns to IDLING, so no
+    command bit can survive a fault or a finished move.
+*)
+FUNCTION_BLOCK FB_MCS2StepMode_Test EXTENDS TcUnit.FB_TestSuite
+VAR
+END_VAR
+]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[TestFirstScanClearsCommandBits();
+TestIdleKeepsStartBitCleared();
+TestFaultClearsCommandBits();
+TestAbortLeavesDriveDeenergised();
+]]></ST>
+    </Implementation>
+    <Method Name="TestFirstScanClearsCommandBits" Id="{b1c0a001-0000-4000-8000-000000000001}">
+      <Declaration><![CDATA[METHOD PRIVATE TestFirstScanClearsCommandBits
+VAR_INST
+    fbSut : FB_MCS2StepMode;
+    stMotionStage : ST_MotionStage;
+    stDrive : ST_DS402Drive;
+END_VAR
+]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[TEST(__POUNAME());
+
+// A control word left behind by the previous PLC cycle.
+stDrive.nDriveControl := 16#1F;
+
+// The drive does not report itself enabled, so only the start-up clear may
+// touch the control word here.
+fbSut(
+    bExecute := FALSE,
+    stDS402Drive := stDrive,
+    stMotionStage := stMotionStage
+);
+
+AssertFalse(stDrive.nDriveControl.3, 'first scan must clear the enable-operation bit');
+AssertFalse(stDrive.nDriveControl.4, 'first scan must clear the step start bit');
+
+TEST_FINISHED();
+]]></ST>
+      </Implementation>
+    </Method>
+
+    <Method Name="TestIdleKeepsStartBitCleared" Id="{b1c0a001-0000-4000-8000-000000000002}">
+      <Declaration><![CDATA[METHOD PRIVATE TestIdleKeepsStartBitCleared
+VAR_INST
+    fbSut : FB_MCS2StepMode;
+    stMotionStage : ST_MotionStage;
+    stDrive : ST_DS402Drive;
+END_VAR
+]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[TEST(__POUNAME());
+
+// Consume the first-scan cycle, then present an enabled, idle drive.
+fbSut(
+    bExecute := FALSE,
+    stDS402Drive := stDrive,
+    stMotionStage := stMotionStage
+);
+stDrive.nDriveControl := 16#0F;
+stDrive.stDriveStatus.OperationEnabled := TRUE;
+
+// Uncommanded idle cycle.
+fbSut(
+    bExecute := FALSE,
+    stDS402Drive := stDrive,
+    stMotionStage := stMotionStage
+);
+
+// No start command may be asserted while idle. Bit 3 is left to the drive
+// manager's DS402 start-up sequence, which re-enables the drive between moves.
+AssertFalse(stDrive.nDriveControl.4, 'idle must not assert the step start bit');
+AssertTrue(stDrive.nDriveControl.3, 'idle must not disturb the DS402 start-up enable');
+
+TEST_FINISHED();
+]]></ST>
+      </Implementation>
+    </Method>
+
+    <Method Name="TestFaultClearsCommandBits" Id="{b1c0a001-0000-4000-8000-000000000003}">
+      <Declaration><![CDATA[METHOD PRIVATE TestFaultClearsCommandBits
+VAR_INST
+    fbSut : FB_MCS2StepMode;
+    stMotionStage : ST_MotionStage;
+    stDrive : ST_DS402Drive;
+END_VAR
+]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[TEST(__POUNAME());
+
+// Run a commanded step move up to IN_PROGRESS: IDLING -> INIT -> IN_PROGRESS.
+fbSut(
+    bExecute := TRUE,
+    stDS402Drive := stDrive,
+    stMotionStage := stMotionStage
+);
+AssertTrue(stDrive.nDriveControl.3, 'a commanded step move must enable the drive');
+fbSut(
+    bExecute := TRUE,
+    stDS402Drive := stDrive,
+    stMotionStage := stMotionStage
+);
+AssertTrue(stDrive.nDriveControl.4, 'the step start bit must be set while the move runs');
+
+// The drive reports the op-mode specific fault (status bit 13).
+stDrive.stDriveStatus.Bit13_OpModeSpecific := TRUE;
+fbSut(
+    bExecute := TRUE,
+    stDS402Drive := stDrive,
+    stMotionStage := stMotionStage
+);
+
+AssertTrue(stMotionStage.bError, 'a bit 13 fault must latch the stage error');
+AssertFalse(stDrive.nDriveControl.3, 'ERROR must de-energise the drive (bit 3)');
+AssertFalse(stDrive.nDriveControl.4, 'ERROR must clear the step start bit (bit 4)');
+
+// The safe state is held for as long as the fault lasts, whatever is written
+// to the control word in between.
+stDrive.nDriveControl := 16#1F;
+fbSut(
+    bExecute := TRUE,
+    stDS402Drive := stDrive,
+    stMotionStage := stMotionStage
+);
+
+AssertFalse(stDrive.nDriveControl.3, 'ERROR must keep the drive de-energised');
+AssertFalse(stDrive.nDriveControl.4, 'ERROR must keep the start bit cleared');
+
+TEST_FINISHED();
+]]></ST>
+      </Implementation>
+    </Method>
+
+    <Method Name="TestAbortLeavesDriveDeenergised" Id="{b1c0a001-0000-4000-8000-000000000004}">
+      <Declaration><![CDATA[METHOD PRIVATE TestAbortLeavesDriveDeenergised
+VAR_INST
+    fbSut : FB_MCS2StepMode;
+    stMotionStage : ST_MotionStage;
+    stDrive : ST_DS402Drive;
+END_VAR
+]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[TEST(__POUNAME());
+
+// Run a commanded step move up to IN_PROGRESS: IDLING -> INIT -> IN_PROGRESS.
+fbSut(
+    bExecute := TRUE,
+    stDS402Drive := stDrive,
+    stMotionStage := stMotionStage
+);
+fbSut(
+    bExecute := TRUE,
+    stDS402Drive := stDrive,
+    stMotionStage := stMotionStage
+);
+AssertTrue(stDrive.nDriveControl.4, 'the step start bit must be set while the move runs');
+
+// User stop mid-move.
+fbSut.Halt();
+fbSut(
+    bExecute := TRUE,
+    stDS402Drive := stDrive,
+    stMotionStage := stMotionStage
+);
+
+AssertTrue(fbSut.bStepMoveAborted, 'halt must abort the step move');
+AssertFalse(stDrive.nDriveControl.3, 'INTERRUPTED must de-energise the drive (bit 3)');
+AssertFalse(stDrive.nDriveControl.4, 'INTERRUPTED must clear the step start bit (bit 4)');
+
+// The block returns to IDLING with the drive left de-energised.
+fbSut(
+    bExecute := TRUE,
+    stDS402Drive := stDrive,
+    stMotionStage := stMotionStage
+);
+
+AssertFalse(stDrive.nDriveControl.3, 'the drive must stay de-energised on return to IDLING');
+AssertFalse(stDrive.nDriveControl.4, 'no command bit may be asserted on return to IDLING');
+
+TEST_FINISHED();
+]]></ST>
+      </Implementation>
+    </Method>
+  </POU>
+</TcPlcObject>

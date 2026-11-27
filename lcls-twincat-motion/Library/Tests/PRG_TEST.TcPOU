@@ -26,6 +26,8 @@ VAR
     fb_PowerEnableMode_Test: FB_PowerEnableMode_Test;
     fb_MotionBacklashCompensation_Test: FB_MotionBacklashCompensation_Test;
     fb_MCS2DriveManager_Test: FB_MCS2DriveManager_Test;
+    fb_MCS2Home_Test: FB_MCS2Home_Test;
+    fb_MCS2StepMode_Test: FB_MCS2StepMode_Test;
 END_VAR
 ]]></Declaration>
     <Implementation>
