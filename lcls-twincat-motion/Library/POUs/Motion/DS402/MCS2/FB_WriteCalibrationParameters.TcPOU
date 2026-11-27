@@ -1,56 +1,110 @@
 ﻿<?xml version="1.0" encoding="utf-8"?>
 <TcPlcObject Version="1.1.0.1">
   <POU Name="FB_WriteCalibrationParameters" Id="{6f8141b3-3a18-4ecd-8d0f-d7b01f6561a0}" SpecialFunc="None">
-    <Declaration><![CDATA[// Calibration Param SDO Hybrid Logic (startup-sequential, then on-demand)
-// Sequential trigger (bCalibParamStep statemachine) is used at startup or force, otherwise parallel/on-demand.
+    <Declaration><![CDATA[(*
+    Purpose:
+        Write the calibration-option word (object 0x2004) of one MCS2 DS402 channel
+        over CoE, so a calibration move runs with the options requested through the
+        CAL_OPT PV (stMCS2ChanParameter.nCalibrationOpt).
+    Usage:
+        Instantiate one block per MCS2 channel beside the sibling parameter writers
+        and call it every cycle with bEnable TRUE. Wire stDS402Drive, stMotionStage
+        and stMCS2ChanParameter to the owning stage's own structures; the block
+        returns immediately while any of the three references is invalid. Writes
+        happen on demand, as soon as the requested word differs from the last one
+        written. When the options are still not set 6 s after enable (tonStartUp.Q,
+        e.g. the CAL_OPT request arrives late) or while bForceSequentialSDOs is held
+        TRUE, the block runs the sequential nCalibParamStep state machine instead:
+        it writes one SDO and then parks in DONE. Not instantiated in this library
+        today; it is kept with the per-parameter writers for channel setup.
+    Objectives:
+        - Keep at most one CoE SDO write in flight, and drive the startup sweep from
+          a named, non-blocking IDLE/CALIBOPTS/DONE/ERROR state machine.
+        - Write 0x2004 only when the requested option word actually changed
+          (nRecentCalibrationOpt), so a steady CAL_OPT does not hammer the mailbox.
+        - Report an SDO failure on stMotionStage.bError/nErrorId and hold the
+          sequential path in ERROR until bErrorAcknowledge, so a failed write is
+          visible instead of being retried silently on the next scan.
+        - Set bCalibrationsParamsSet only once the word is on the drive, and drop it
+          while a write is in flight, so callers can treat it as "options applied".
+    History:
+        2025-10-28  Yann Stephen Mandza  Created, split out of the DS402/MCS2
+                                         channel-state refactor.
+        2026-08-11  ysmandza            Dead safe-direction (0x200C) writer dropped;
+                                        the Pre-Op safe-direction write now lives in
+                                        FB_WriteChanParameters.
+        2026-11-27  Scirix Agent        POU header and per-declaration comments added.
+*)
 
 FUNCTION_BLOCK FB_WriteCalibrationParameters
 VAR_INPUT
+    // TRUE enables the block; FALSE suspends it and leaves the drive untouched.
     bEnable : BOOL;
 END_VAR
 VAR_IN_OUT
+    // Drive process data; nSlaveAddr selects the EtherCAT slave that is written.
     stDS402Drive         : ST_DS402Drive;
+    // Owning stage interface: supplies the master AMS Net ID and receives the raised fault.
     stMotionStage        : ST_MotionStage;
+    // Channel parameters: nCalibrationOpt is the requested option word, nChanCalibrationOptIdx its SDO index.
     stMCS2ChanParameter	: ST_MCS2ChanParameter;
 END_VAR
 
 VAR_OUTPUT
+   // TRUE once the requested calibration options are known to be on the drive; FALSE while a write is in flight or after a fault.
    bCalibrationsParamsSet : BOOL;
 END_VAR
 VAR
+    // Unused: the channel-type write is not part of this block's implementation.
     {attribute 'hide'}
     fbChannelTypeWrite          : FB_EcCoESdoWrite;
+    // Unused: the positioner-type write is not part of this block's implementation.
     {attribute 'hide'}
     fbPositionerTypeWrite       : FB_EcCoESdoWrite;
+    // CoE SDO writer for the calibration-option word (nChanCalibrationOptIdx, subindex 0).
     {attribute 'hide'}
     fbCalibrationOptWrite       : FB_EcCoESdoWrite;
+    // Unused: companion falling-edge detector of the unused positioner-type writer.
     {attribute 'hide'}
     ftPositionerTypeSetDone     : F_TRIG;
+    // Falling edge of fbCalibrationOptWrite.bBusy: the in-flight SDO write finished.
     {attribute 'hide'}
     ftCalibrationOptSetDone     : F_TRIG;
+    // Unused: companion falling-edge detector of the unused channel-type writer.
     {attribute 'hide'}
     ftChannelTypeSetDone        : F_TRIG;
+    // Unused: last-written positioner type (the write lives in a sibling block).
     {attribute 'hide'}
     nRecentPositionerType       : UDINT;
+    // Last calibration-option word written successfully; a mismatch requests a new write.
     {attribute 'hide'}
     nRecentCalibrationOpt       : UDINT;
+    // Unused: last-written channel type (the write lives in a sibling block).
     {attribute 'hide'}
     nRecentChannelType          : UDINT;
+    // Startup window timer (PT = T#6S below): its Q opens the sequential SDO path.
     tonStartUp : TON;
+    // Sequencer state: IDLE, CALIBOPTS (write in progress), DONE, ERROR (latched until acknowledged).
     nCalibParamStep : (IDLE := 0, CALIBOPTS := 1, DONE := 10, ERROR := -1) := IDLE;
+    // TRUE holds the block in the sequential state machine outside the startup window (manual re-sweep).
     bForceSequentialSDOs : BOOL := FALSE;
+    // Acknowledge for a latched ERROR: clears the stage fault and restarts the sequence.
     bErrorAcknowledge: BOOL;
 END_VAR
 
 ]]></Declaration>
     <Implementation>
-      <ST><![CDATA[IF NOT __ISVALIDREF(stDS402Drive)
+      <ST><![CDATA[// All three structures are wired by the owning stage FB; without them
+// there is nothing to write and nowhere to report a fault.
+IF NOT __ISVALIDREF(stDS402Drive)
     OR NOT __ISVALIDREF(stMotionStage)
     OR NOT __ISVALIDREF(stMCS2ChanParameter) THEN
     RETURN;
 END_IF
 
+// Disabled: hold the outputs as they are and issue no SDO write.
 IF bEnable THEN
+    // Startup window: counts while enabled and until the options are reported set.
     tonStartUp(
         IN := bEnable AND NOT bCalibrationsParamsSet,
         PT := T#6S
@@ -68,15 +122,19 @@ IF bEnable THEN
         stMotionStage.nErrorId := 0;
     END_IF
 
+    // Watch the write for completion; the falling edge of bBusy is evaluated below.
     ftCalibrationOptSetDone(CLK := fbCalibrationOptWrite.bBusy);
 
+    // Sequential path: startup window elapsed, or forced for a manual re-sweep.
     IF tonStartUp.Q OR bForceSequentialSDOs THEN
         CASE nCalibParamStep OF
+            // Idle: release the writer, then always advance into the write step.
             IDLE:
                 bCalibrationsParamsSet         := FALSE;
                 fbCalibrationOptWrite.bExecute := FALSE;
                 nCalibParamStep                := CALIBOPTS;
 
+            // Calibration option: write only when the request differs from the drive value.
             CALIBOPTS: // Calibration Option
                 IF stMCS2ChanParameter.nCalibrationOpt <> nRecentCalibrationOpt THEN
                     fbCalibrationOptWrite.bExecute := TRUE;
@@ -95,18 +153,21 @@ IF bEnable THEN
                     nCalibParamStep := DONE;
                 END_IF
 
+            // Done: the option word is on the drive; stay here until a fault restarts it.
             DONE:
                 bCalibrationsParamsSet := TRUE;
 
+            // Error: fault latched on the stage; hold here until bErrorAcknowledge.
             ERROR:
                 bCalibrationsParamsSet := FALSE;
 
+            // Unexpected state value: fall back to IDLE and rewrite from the top.
             ELSE
                 nCalibParamStep := IDLE;
         END_CASE
 
     ELSE
-        // Parallel SDO mode — single write
+        // On-demand path — single write whenever the requested option word changed.
         fbCalibrationOptWrite.bExecute := stMCS2ChanParameter.nCalibrationOpt <> nRecentCalibrationOpt;
         IF ftCalibrationOptSetDone.Q THEN
             fbCalibrationOptWrite.bExecute := FALSE;
@@ -120,6 +181,7 @@ IF bEnable THEN
         END_IF
     END_IF
 
+    // Issue (or continue) the CoE SDO write of nCalibrationOpt to the channel index.
     fbCalibrationOptWrite(
         sNetId     := stMotionStage.stAxisParameters.sAmsNetId,
         nSlaveAddr := stDS402Drive.nSlaveAddr,
@@ -129,6 +191,7 @@ IF bEnable THEN
         cbBufLen   := SIZEOF(stMCS2ChanParameter.nCalibrationOpt)
     );
 
+    // Not "set" while a write is in flight.
     bCalibrationsParamsSet R= fbCalibrationOptWrite.bBusy;
 END_IF]]></ST>
     </Implementation>
