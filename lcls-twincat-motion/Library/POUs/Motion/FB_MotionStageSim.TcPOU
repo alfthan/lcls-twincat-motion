@@ -3,17 +3,60 @@
   <POU Name="FB_MotionStageSim" Id="{d9a67e97-6cca-43d0-9ed9-24a1d18bbca1}" SpecialFunc="None">
     <Declaration><![CDATA[FUNCTION_BLOCK FB_MotionStageSim
 (*
-    Set all the values needed for a fake motor to be movable
-    via the IOC, then call FB_MotionStage
+    FB_MotionStageSim - simulated motion stage, so a virtual axis can be moved
+    from the motor IOC without real hardware.
+
+    PURPOSE
+        Provides the inputs a real ST_MotionStage receives from its drive, its
+        limit switches, its STO circuit and the PMPS governor, then hands the
+        stage to FB_MotionStage so the normal move/home/reset logic runs
+        unchanged.
+
+    USAGE
+        Declare one instance per simulated stage and call it every cycle with
+        the same ST_MotionStage that the rest of the PLC (or the test) uses:
+            fbMotionStageSim(
+                stMotionStage:=stMotionStage,
+                nEnableMode:=E_StageEnableMode.DURING_MOTION,
+            );
+        The stand-in inputs are written only while bInit is FALSE, i.e. on the
+        first call, so a caller can clear a limit or an enable in stMotionStage
+        afterwards to simulate a real fault. Intended for TcUnit tests and for
+        machine bring-up without hardware, not as a substitute for a drive.
+
+    OBJECTIVES
+        - Let a virtual axis complete the normal IOC move sequence so motion
+          logic can be exercised in tests without field hardware.
+        - Keep simulated and real stages on one code path: FB_MotionStage stays
+          the only place that interprets the command struct.
+        - Make the enable policy selectable per instance (nEnableMode) so both
+          ALWAYS and DURING_MOTION behaviour can be reproduced.
+        - Collect the stand-in hardware and safety values here instead of
+          repeating them at every test call site.
+
+    HISTORY
+        2019-12-02 / Zachary Lentz
+            Function block added as the simulated motion block.
+        2026-11-27 / Scirix Agent
+            Extended this header with usage, objectives and history and
+            commented every declaration; documentation only, no behaviour
+            change (audit finding #1100, convention conv_321640e095c0).
 *)
 VAR_IN_OUT
+    // Shared motion interface struct of the simulated stage: carries the
+    // command inputs written by the IOC and the status it reads back, plus the
+    // stand-in hardware and safety inputs seeded on the first call.
     stMotionStage: ST_MotionStage;
 END_VAR
 VAR_INPUT
+    // Enable policy copied into stMotionStage.nEnableMode on the first call:
+    // ALWAYS keeps the axis enabled, DURING_MOTION enables only for a move.
     nEnableMode: E_StageEnableMode := E_StageEnableMode.ALWAYS;
 END_VAR
 VAR
+    // Real motion implementation; performs all command and status handling.
     fbMotionStage: FB_MotionStage;
+    // First-scan latch: FALSE until the stand-in hardware values are seeded.
     bInit: BOOL;
 END_VAR
 ]]></Declaration>
