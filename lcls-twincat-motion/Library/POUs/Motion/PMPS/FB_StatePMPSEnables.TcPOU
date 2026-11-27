@@ -146,12 +146,16 @@ IF bLockBounds THEN
     bForwardEnabled  := stMotionStage.Axis.NcToPlc.ActPos < fUpperPos AND stMotionStage.fPosition < fUpperPos;
     bBackwardEnabled := stMotionStage.Axis.NcToPlc.ActPos > fLowerPos AND stMotionStage.fPosition > fLowerPos;
 
-    IF (stMotionStage.nErrorId = 16#4223 OR stMotionStage.nErrorId = 16#4260) AND
+    // The drive/controller enable errors are the ones we may have caused ourselves by denying an enable direction.
+    IF (stMotionStage.nErrorId = MotionDiagnosticsConstants.NC_ERROR_NO_ENABLE
+        OR stMotionStage.nErrorId = MotionDiagnosticsConstants.NC_ERROR_DRIVE_DISABLED) AND
         ((stMotionStage.bAllForwardEnable AND NOT bForwardEnabled) OR
         (stMotionStage.bAllBackwardEnable AND NOT bBackwardEnabled)) THEN
         // Cannot move forward/backward and not triggered by one of the stMotionStage disables so overwrite the error with a custom error message to give more context.
         stMotionStage.sCustomErrorMessage := CONCAT(CONCAT(CONCAT(
-            'Limits exceeded for most recent PMPS position state: ', LREAL_TO_FMTSTR(fLowerPos,5,TRUE)), ' < pos < '), LREAL_TO_FMTSTR(fUpperPos,5,TRUE));
+            'Limits exceeded for most recent PMPS position state: ',
+            LREAL_TO_FMTSTR(fLowerPos, MotionDiagnosticsConstants.POSITION_MSG_PRECISION, TRUE)), ' < pos < '),
+            LREAL_TO_FMTSTR(fUpperPos, MotionDiagnosticsConstants.POSITION_MSG_PRECISION, TRUE));
     END_IF
 ELSE
     // Either invalid state with a fault or FB not enabled

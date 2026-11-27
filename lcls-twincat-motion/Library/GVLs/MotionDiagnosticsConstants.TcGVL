@@ -1,0 +1,26 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <GVL Name="MotionDiagnosticsConstants" Id="{065528ea-c13a-44dd-ad2a-7e8954fda60a}">
+    <Declaration><![CDATA[{attribute 'qualified_only'}
+(*
+    Global Motion Diagnostic Constants
+
+    Fixed, hardware-dependent codes and formatting widths used when lcls-twincat-motion
+    builds its own diagnostic messages. These are vendor NC error identifiers and message
+    formatting values: they are not tunable, so they do not belong in MotionConstants,
+    which holds the constants that are reconfigurable at the project level.
+    The full vendor code to message table lives in F_MotionErrorCodeLookup; the constants
+    here exist for the logic that must branch on one specific code.
+*)
+VAR_GLOBAL CONSTANT
+    // TwinCAT NC axis error 16#4223, "No enable for controller and/or feed".
+    // Matched to detect that our own enable denial stopped the axis rather than a real axis fault.
+    NC_ERROR_NO_ENABLE: UDINT := 16#4223;
+    // TwinCAT NC axis error 16#4260, "Drive disabled".
+    // Matched to detect that the drive dropped its enable rather than a real axis fault.
+    NC_ERROR_DRIVE_DISABLED: UDINT := 16#4260;
+    // Number of decimal places used when a position is formatted into a diagnostic message.
+    POSITION_MSG_PRECISION: INT := 5;
+END_VAR]]></Declaration>
+  </GVL>
+</TcPlcObject>
