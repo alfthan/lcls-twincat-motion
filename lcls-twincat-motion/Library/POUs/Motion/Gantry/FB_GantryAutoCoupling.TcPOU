@@ -1,12 +1,49 @@
 ﻿<?xml version="1.0" encoding="utf-8"?>
 <TcPlcObject Version="1.1.0.1">
   <POU Name="FB_GantryAutoCoupling" Id="{532dfcaf-6187-4140-aaad-e20a9bbe6b43}" SpecialFunc="None">
-    <Declaration><![CDATA[FUNCTION_BLOCK FB_GantryAutoCoupling
+    <Declaration><![CDATA[(*
+    FB_GantryAutoCoupling
+    Auto-couples and decouples a master/slave gantry axis pair.
+
+    Purpose:
+        Keeps the two axes of a gantry aligned by activating the gantry virtual
+        difference limit switch, gearing the axes together at initialization
+        (MC_GEARIN) and ungearing them on request (MC_GEAROUT).
+
+    Usage:
+        Call once per PLC cycle with both ST_MotionStage instances and their
+        encoders. bExecuteDecouple is the decouple request from the caller and
+        bReset is the dedicated acknowledge for a latched gearing fault.
+
+    Objectives:
+        Every gearing command is bounded by tGearTimeout. If MC_GEARIN or
+        MC_GEAROUT does not complete in time the command is cancelled and a fault
+        is latched on both axes with an explicit message; no further gearing
+        command is issued until the fault is acknowledged, either with bReset or
+        with the reset input of the two axes.
+
+    History:
+        Author/Date unknown - initial version
+        2026-11-27 - add gearing command watchdog and latched fault
+*)
+FUNCTION_BLOCK FB_GantryAutoCoupling
 VAR_INPUT
+    // Gantry difference tolerance, in encoder counts
     nGantryTol : LINT;
+    // Maximum time allowed for a gearing command to complete
+    tGearTimeout : TIME := T#10S;
+    // Clears a latched gearing fault
+    bReset : BOOL;
 END_VAR
 VAR_OUTPUT
+    // TRUE when Master is geared as gantry master and Slave as gantry slave
     bGantryAlreadyCoupled : BOOL;
+    // TRUE while a latched gearing fault is active
+    bError : BOOL;
+    // Error code of the latched gearing fault
+    nErrorId : UDINT;
+    // Message describing the latched gearing fault
+    sErrorMessage : STRING;
 END_VAR
 VAR_IN_OUT
     Master : ST_MotionStage;
@@ -22,6 +59,14 @@ VAR
     decouple : MC_GEAROUT;
     bInitComplete : BOOL;
     fbSetEnables : FB_SetEnables;
+    // Gearing command watchdogs, timed against tGearTimeout
+    tonCoupleTimeout : TON;
+    tonDecoupleTimeout : TON;
+    // TRUE while a gearing command is issued and has not completed
+    bCouplePending : BOOL;
+    bDecouplePending : BOOL;
+    // TRUE while the latched fault has been written to both axes
+    bFaultReported : BOOL;
 END_VAR
 ]]></Declaration>
     <Implementation>
@@ -52,17 +97,71 @@ IF bGantryAlreadyCoupled THEN
 END_IF
 
 
+// Gearing command watchdogs
+// A command is pending from the moment it is issued until the matching MC_GEARIN/MC_GEAROUT
+// is no longer busy. It must complete within tGearTimeout, otherwise it is cancelled and
+// the fault below is latched.
+bCouplePending := bExecuteCouple OR couple.Busy;
+bDecouplePending := bExecuteDecouple OR decouple.Busy;
+tonCoupleTimeout(IN := bCouplePending AND NOT bGantryAlreadyCoupled AND NOT bError,
+                 PT := tGearTimeout);
+tonDecoupleTimeout(IN := bDecouplePending AND bGantryAlreadyCoupled AND NOT bError,
+                   PT := tGearTimeout);
+
+// Cancel the stalled gearing command and latch the fault
+IF NOT bError AND tonCoupleTimeout.Q THEN
+    bError := TRUE;
+    nErrorId := E_LCLSMotionError.GANTRY_COUPLE_TIMEOUT;
+    bExecuteCouple := FALSE;
+ELSIF NOT bError AND tonDecoupleTimeout.Q THEN
+    bError := TRUE;
+    nErrorId := E_LCLSMotionError.GANTRY_DECOUPLE_TIMEOUT;
+    bExecuteDecouple := FALSE;
+END_IF
+
+// Acknowledge the latched gearing fault: the dedicated reset, or the axis reset that
+// already dismissed the fault this block reported on both axes
+IF bError AND (bReset OR (bFaultReported AND NOT Master.bError AND NOT Slave.bError)) THEN
+    bError := FALSE;
+    bFaultReported := FALSE;
+    nErrorId := 0;
+    sErrorMessage := '';
+    Master.bError := FALSE;
+    Master.nErrorId := 0;
+    Master.sErrorMessage := '';
+    Master.sCustomErrorMessage := '';
+    Slave.bError := FALSE;
+    Slave.nErrorId := 0;
+    Slave.sErrorMessage := '';
+    Slave.sCustomErrorMessage := '';
+END_IF
+
+// Report the latched fault with an explicit message on both axes, so that FB_MotionStage
+// blocks further motion and the message reaches the axis EPICS error PVs
+IF bError THEN
+    sErrorMessage := F_MotionErrorCodeLookup(nErrorId := nErrorId);
+    Master.bError := TRUE;
+    Master.nErrorId := nErrorId;
+    Master.sErrorMessage := sErrorMessage;
+    Master.sCustomErrorMessage := sErrorMessage;
+    Slave.bError := TRUE;
+    Slave.nErrorId := nErrorId;
+    Slave.sErrorMessage := sErrorMessage;
+    Slave.sCustomErrorMessage := sErrorMessage;
+    bFaultReported := TRUE;
+END_IF
+
 // Coupling states
 // Auto-coupling at init and auto-reset of coupling boolean
-bExecuteCouple S= NOT bInitComplete;
-
-bExecuteCouple R= couple.Busy OR bGantryAlreadyCoupled;
+// A latched fault also drops the execute, so a stalled gearing operation is not repeated
+bExecuteCouple S= NOT bInitComplete AND NOT bError;
+bExecuteCouple R= couple.Busy OR bGantryAlreadyCoupled OR bError;
 couple(Master:=Master.Axis, Slave:=Slave.Axis, Execute:=bExecuteCouple);
 
 bInitComplete S= bGantryAlreadyCoupled;
 
 // Decoupling with auto-reset of coupling boolean
-bExecuteDecouple R= decouple.Busy OR NOT bGantryAlreadyCoupled;
+bExecuteDecouple R= decouple.Busy OR NOT bGantryAlreadyCoupled OR bError;
 decouple(Slave:=Slave.Axis, Execute:=bExecuteDecouple);]]></ST>
     </Implementation>
   </POU>

@@ -34,6 +34,8 @@ END_VAR
     E_LCLSMotionError.UNSAFE: msg:='Position state unsafe';
     E_LCLSMotionError.INVALID: msg:='Position state invalid';
     E_LCLSMotionError.MCS2_FAULT: msg:='MCS2 drive fault, NC did not latch';
+    E_LCLSMotionError.GANTRY_COUPLE_TIMEOUT: msg:='Gantry gearing (MC_GEARIN) timed out, axes are not coupled';
+    E_LCLSMotionError.GANTRY_DECOUPLE_TIMEOUT: msg:='Gantry ungearing (MC_GEAROUT) timed out, axes are still coupled';
     E_LCLSMotionError.TEST: msg:='Fake testing error';
 
     // Fallbacks
