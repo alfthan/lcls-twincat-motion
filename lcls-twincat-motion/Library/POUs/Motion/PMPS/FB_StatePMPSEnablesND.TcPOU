@@ -11,9 +11,9 @@
 *)
 VAR_IN_OUT
     // The motors with a combined N-dimensional state
-    astMotionStage: ARRAY[1..MotionConstants.MAX_STATE_MOTORS] OF ST_MotionStage;
+    astMotionStage: ARRAY[1..MotionConstants_GVL.MAX_STATE_MOTORS] OF ST_MotionStage;
     // Each motor's respective position states along its direction
-    astPositionState: ARRAY[1..MotionConstants.MAX_STATE_MOTORS] OF ARRAY[1..GeneralConstants.MAX_STATES] OF ST_PositionState;
+    astPositionState: ARRAY[1..MotionConstants_GVL.MAX_STATE_MOTORS] OF ARRAY[1..GeneralConstants.MAX_STATES] OF ST_PositionState;
     // Hardware output to fault to if there is a problem.
     fbFFHWO: FB_HardwareFFOutput;
 END_VAR
@@ -35,19 +35,19 @@ VAR_INPUT
 END_VAR
 VAR_OUTPUT
     // Per-motor enable state we send to MC_Power. This is a pass-through from stMotionStage.
-    abEnabled: ARRAY[1..MotionConstants.MAX_STATE_MOTORS] OF BOOL;
+    abEnabled: ARRAY[1..MotionConstants_GVL.MAX_STATE_MOTORS] OF BOOL;
     // Per-motor forward enable state we send to MC_Power. This may be a pass-through or an override to FALSE.
-    abForwardEnabled: ARRAY[1..MotionConstants.MAX_STATE_MOTORS] OF BOOL;
+    abForwardEnabled: ARRAY[1..MotionConstants_GVL.MAX_STATE_MOTORS] OF BOOL;
     // Per-motor backwards enable state we send to MC_Power. This may be a pass-through or an override to FALSE.
-    abBackwardEnabled: ARRAY[1..MotionConstants.MAX_STATE_MOTORS] OF BOOL;
+    abBackwardEnabled: ARRAY[1..MotionConstants_GVL.MAX_STATE_MOTORS] OF BOOL;
     // Per-motor TRUE if there is a valid goal position and FALSE otherwise. This makes a fast fault if FALSE.
-    abValidGoal: ARRAY[1..MotionConstants.MAX_STATE_MOTORS] OF BOOL;
+    abValidGoal: ARRAY[1..MotionConstants_GVL.MAX_STATE_MOTORS] OF BOOL;
     // Set to TRUE if the arrays have mismatched sizing. For this FB, this means the motor won't ever get an enable.
     bMotorCountError: BOOL;
 END_VAR
 VAR
     // The individual state limit function blocks
-    afbStateEnables: ARRAY[1..MotionConstants.MAX_STATE_MOTORS] OF FB_StatePMPSEnables;
+    afbStateEnables: ARRAY[1..MotionConstants_GVL.MAX_STATE_MOTORS] OF FB_StatePMPSEnables;
     ffMaint: FB_FastFault;
     ffProgrammerError: FB_FastFault;
     nIter: DINT;
@@ -67,7 +67,7 @@ RunFastFaults();
         <ST><![CDATA[
 // Make sure the motor count is valid (positive, nonzero, less or equal to the max)
 bMotorCountError S= nActiveMotorCount <= 0;
-bMotorCountError S= nActiveMotorCount > MotionConstants.MAX_STATE_MOTORS;
+bMotorCountError S= nActiveMotorCount > MotionConstants_GVL.MAX_STATE_MOTORS;
 ]]></ST>
       </Implementation>
     </Action>

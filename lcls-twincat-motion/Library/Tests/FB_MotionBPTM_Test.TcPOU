@@ -12,7 +12,7 @@
     so these tests must implement timeouts.
 *)
 VAR
-    astMotionStage: ARRAY[1..MotionConstants.MAX_STATE_MOTORS] OF ST_MotionStage;
+    astMotionStage: ARRAY[1..MotionConstants_GVL.MAX_STATE_MOTORS] OF ST_MotionStage;
     stGoal1: ST_DbStateParams;
     stGoal2: ST_DbStateParams;
     stTrans: ST_DbStateParams;

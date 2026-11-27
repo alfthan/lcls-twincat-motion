@@ -14,8 +14,8 @@
     - Wrong count = fast fault
 *)
 VAR
-    astMotionStage: ARRAY[1..MotionConstants.MAX_STATE_MOTORS] OF ST_MotionStage;
-    astPositionState: ARRAY[1..MotionConstants.MAX_STATE_MOTORS] OF ARRAY[1..GeneralConstants.MAX_STATES] OF ST_PositionState;
+    astMotionStage: ARRAY[1..MotionConstants_GVL.MAX_STATE_MOTORS] OF ST_MotionStage;
+    astPositionState: ARRAY[1..MotionConstants_GVL.MAX_STATE_MOTORS] OF ARRAY[1..GeneralConstants.MAX_STATES] OF ST_PositionState;
     afbInternal: ARRAY[1..2] OF FB_PositionStateInternal;
     nIter: UINT;
 END_VAR

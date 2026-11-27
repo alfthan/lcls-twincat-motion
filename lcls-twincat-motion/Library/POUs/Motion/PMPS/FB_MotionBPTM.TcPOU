@@ -11,7 +11,7 @@ FUNCTION_BLOCK FB_MotionBPTM
 *)
 VAR_IN_OUT
     // Array of motors that will move for this beam transition
-    astMotionStage: ARRAY[1..MotionConstants.MAX_STATE_MOTORS] OF ST_MotionStage;
+    astMotionStage: ARRAY[1..MotionConstants_GVL.MAX_STATE_MOTORS] OF ST_MotionStage;
     // The arbiter to request beam states from
     fbArbiter: FB_Arbiter;
     // The fast fault output to fault to
@@ -79,7 +79,7 @@ END_IF
         <ST><![CDATA[
 // Make sure the motor count is valid (positive, nonzero, less or equal to the max)
 bMotorCountError S= nActiveMotorCount <= 0;
-bMotorCountError S= nActiveMotorCount > MotionConstants.MAX_STATE_MOTORS;
+bMotorCountError S= nActiveMotorCount > MotionConstants_GVL.MAX_STATE_MOTORS;
 ]]></ST>
       </Implementation>
     </Action>

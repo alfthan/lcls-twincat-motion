@@ -11,9 +11,9 @@ FUNCTION_BLOCK FB_PositionStateMoveND
 *)
 VAR_IN_OUT
     // Array of motors to move together
-    astMotionStage: ARRAY[1..MotionConstants.MAX_STATE_MOTORS] OF ST_MotionStage;
+    astMotionStage: ARRAY[1..MotionConstants_GVL.MAX_STATE_MOTORS] OF ST_MotionStage;
     // 1D Position states: the current position to send each axis to
-    astPositionState: ARRAY[1..MotionConstants.MAX_STATE_MOTORS] OF ST_PositionState;
+    astPositionState: ARRAY[1..MotionConstants_GVL.MAX_STATE_MOTORS] OF ST_PositionState;
 END_VAR
 VAR_INPUT
     // The number of motors we're actually using
@@ -45,7 +45,7 @@ VAR_OUTPUT
 END_VAR
 VAR
     // 1D State movers: FBs to move the motors
-    afbPositionStateMove: ARRAY[1..MotionConstants.MAX_STATE_MOTORS] OF FB_PositionStateMove;
+    afbPositionStateMove: ARRAY[1..MotionConstants_GVL.MAX_STATE_MOTORS] OF FB_PositionStateMove;
     nIndex: DINT;
     bMotorCountError: BOOL;
     nLowerBound: DINT;
@@ -66,7 +66,7 @@ END_IF
         <ST><![CDATA[
 // Make sure the motor count is valid (positive, nonzero, less or equal to the max)
 bMotorCountError S= nActiveMotorCount <= 0;
-bMotorCountError S= nActiveMotorCount > MotionConstants.MAX_STATE_MOTORS;
+bMotorCountError S= nActiveMotorCount > MotionConstants_GVL.MAX_STATE_MOTORS;
 
 IF bMotorCountError THEN
     bError := TRUE;

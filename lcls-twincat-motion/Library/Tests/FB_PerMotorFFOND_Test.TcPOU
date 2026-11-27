@@ -22,7 +22,7 @@ TestTwoMotorEncError();
       <Declaration><![CDATA[METHOD TestBlankCount : BOOL
 VAR_INST
     fbFFO: FB_PerMotorFFOND;
-    astMotionStage: ARRAY[1..MotionConstants.MAX_STATE_MOTORS] OF ST_MotionStage;
+    astMotionStage: ARRAY[1..MotionConstants_GVL.MAX_STATE_MOTORS] OF ST_MotionStage;
     fbFFHWO: FB_HardwareFFOutput := (bAutoReset := TRUE);
 END_VAR
 ]]></Declaration>
@@ -56,7 +56,7 @@ TEST_FINISHED();]]></ST>
       <Declaration><![CDATA[METHOD TestTwoMotorEncError : BOOL
 VAR_INST
     fbFFO: FB_PerMotorFFOND;
-    astMotionStage: ARRAY[1..MotionConstants.MAX_STATE_MOTORS] OF ST_MotionStage;
+    astMotionStage: ARRAY[1..MotionConstants_GVL.MAX_STATE_MOTORS] OF ST_MotionStage;
     fbFFHWO: FB_HardwareFFOutput := (bAutoReset := TRUE);
 END_VAR
 ]]></Declaration>

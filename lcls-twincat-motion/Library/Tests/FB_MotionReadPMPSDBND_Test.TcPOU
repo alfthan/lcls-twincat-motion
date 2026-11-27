@@ -50,7 +50,7 @@ TestHalfFull();
       <Declaration><![CDATA[METHOD TestBackfill
 VAR_INST
     fbRead: FB_MotionReadPMPSDBND;
-    astPositionState: ARRAY[1..MotionConstants.MAX_STATE_MOTORS] OF ARRAY[1..GeneralConstants.MAX_STATES] OF ST_PositionState;
+    astPositionState: ARRAY[1..MotionConstants_GVL.MAX_STATE_MOTORS] OF ARRAY[1..GeneralConstants.MAX_STATES] OF ST_PositionState;
     fbFFHWO: FB_HardwareFFOutput := (bAutoReset := TRUE);
     stDefaultBP: ST_DbStateParams;
 END_VAR
@@ -94,7 +94,7 @@ TEST_FINISHED();]]></ST>
       <Declaration><![CDATA[METHOD TestDupe
 VAR_INST
     fbRead: FB_MotionReadPMPSDBND;
-    astPositionState: ARRAY[1..MotionConstants.MAX_STATE_MOTORS] OF ARRAY[1..GeneralConstants.MAX_STATES] OF ST_PositionState;
+    astPositionState: ARRAY[1..MotionConstants_GVL.MAX_STATE_MOTORS] OF ARRAY[1..GeneralConstants.MAX_STATES] OF ST_PositionState;
     fbFFHWO: FB_HardwareFFOutput := (bAutoReset := TRUE);
 END_VAR
 ]]></Declaration>
@@ -130,7 +130,7 @@ TEST_FINISHED();]]></ST>
       <Declaration><![CDATA[METHOD TestHalfFull
 VAR_INST
     fbRead: FB_MotionReadPMPSDBND;
-    astPositionState: ARRAY[1..MotionConstants.MAX_STATE_MOTORS] OF ARRAY[1..GeneralConstants.MAX_STATES] OF ST_PositionState;
+    astPositionState: ARRAY[1..MotionConstants_GVL.MAX_STATE_MOTORS] OF ARRAY[1..GeneralConstants.MAX_STATES] OF ST_PositionState;
     fbFFHWO: FB_HardwareFFOutput := (bAutoReset := TRUE);
 END_VAR
 ]]></Declaration>
@@ -171,7 +171,7 @@ TEST_FINISHED();]]></ST>
       <Declaration><![CDATA[METHOD TestNonsense
 VAR_INST
     fbRead: FB_MotionReadPMPSDBND;
-    astPositionState: ARRAY[1..MotionConstants.MAX_STATE_MOTORS] OF ARRAY[1..GeneralConstants.MAX_STATES] OF ST_PositionState;
+    astPositionState: ARRAY[1..MotionConstants_GVL.MAX_STATE_MOTORS] OF ARRAY[1..GeneralConstants.MAX_STATES] OF ST_PositionState;
     fbFFHWO: FB_HardwareFFOutput := (bAutoReset := TRUE);
 END_VAR
 ]]></Declaration>
@@ -214,7 +214,7 @@ TEST_FINISHED();]]></ST>
       <Declaration><![CDATA[METHOD TestSolo
 VAR_INST
     fbRead: FB_MotionReadPMPSDBND;
-    astPositionState: ARRAY[1..MotionConstants.MAX_STATE_MOTORS] OF ARRAY[1..GeneralConstants.MAX_STATES] OF ST_PositionState;
+    astPositionState: ARRAY[1..MotionConstants_GVL.MAX_STATE_MOTORS] OF ARRAY[1..GeneralConstants.MAX_STATES] OF ST_PositionState;
     fbFFHWO: FB_HardwareFFOutput := (bAutoReset := TRUE);
 END_VAR
 ]]></Declaration>
@@ -255,7 +255,7 @@ TEST_FINISHED();]]></ST>
       <Declaration><![CDATA[METHOD TestTrio
 VAR_INST
     fbRead: FB_MotionReadPMPSDBND;
-    astPositionState: ARRAY[1..MotionConstants.MAX_STATE_MOTORS] OF ARRAY[1..GeneralConstants.MAX_STATES] OF ST_PositionState;
+    astPositionState: ARRAY[1..MotionConstants_GVL.MAX_STATE_MOTORS] OF ARRAY[1..GeneralConstants.MAX_STATES] OF ST_PositionState;
     fbFFHWO: FB_HardwareFFOutput := (bAutoReset := TRUE);
 END_VAR
 ]]></Declaration>

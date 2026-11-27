@@ -1,6 +1,6 @@
 ﻿<?xml version="1.0" encoding="utf-8"?>
 <TcPlcObject Version="1.1.0.1">
-  <GVL Name="MotionConstants" Id="{82935be4-17a5-42af-bb80-6817aae62409}" ParameterList="True">
+  <GVL Name="MotionConstants_GVL" Id="{82935be4-17a5-42af-bb80-6817aae62409}" ParameterList="True">
     <Declaration><![CDATA[{attribute 'qualified_only'}
 (*
     Global Configurable Motion Constants

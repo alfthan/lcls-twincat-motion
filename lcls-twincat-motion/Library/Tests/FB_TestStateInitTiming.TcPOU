@@ -32,8 +32,8 @@ VAR_INST
     stEpicsToPlc: ST_StateEpicsToPlc;
     stPlcToEpics: ST_StatePlcToEpics;
     fbCore: FB_PositionStateND_Core;
-    astMotionStageMax: ARRAY[1..MotionConstants.MAX_STATE_MOTORS] OF ST_MotionStage;
-    astPositionStateMax: ARRAY[1..MotionConstants.MAX_STATE_MOTORS] OF ARRAY[1..GeneralConstants.MAX_STATES] OF ST_PositionState;
+    astMotionStageMax: ARRAY[1..MotionConstants_GVL.MAX_STATE_MOTORS] OF ST_MotionStage;
+    astPositionStateMax: ARRAY[1..MotionConstants_GVL.MAX_STATE_MOTORS] OF ARRAY[1..GeneralConstants.MAX_STATES] OF ST_PositionState;
 
     mcSetPos: MC_SetPosition;
     nCheckStep: UINT := 0;

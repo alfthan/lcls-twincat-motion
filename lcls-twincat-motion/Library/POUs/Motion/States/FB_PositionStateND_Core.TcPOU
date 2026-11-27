@@ -16,9 +16,9 @@
 *)
 VAR_IN_OUT
     // All motors to be used in the states move, including blank/uninitialized structs.
-    astMotionStageMax: ARRAY[1..MotionConstants.MAX_STATE_MOTORS] OF ST_MotionStage;
+    astMotionStageMax: ARRAY[1..MotionConstants_GVL.MAX_STATE_MOTORS] OF ST_MotionStage;
     // All position states for all motors, including unused/invalid states.
-    astPositionStateMax: ARRAY[1..MotionConstants.MAX_STATE_MOTORS] OF ARRAY[1..GeneralConstants.MAX_STATES] OF ST_PositionState;
+    astPositionStateMax: ARRAY[1..MotionConstants_GVL.MAX_STATE_MOTORS] OF ARRAY[1..GeneralConstants.MAX_STATES] OF ST_PositionState;
     // Normal EPICS inputs, gathered into a single struct
     stEpicsToPlc: ST_StateEpicsToPlc;
     // Normal EPICS outputs, gathered into a single struct
@@ -43,7 +43,7 @@ VAR
     fbInternal: FB_PositionStateInternalND;
     fbMove: FB_PositionStateMoveND;
     fbRead: FB_PositionStateReadND;
-    astMoveGoals: ARRAY[1..MotionConstants.MAX_STATE_MOTORS] OF ST_PositionState;
+    astMoveGoals: ARRAY[1..MotionConstants_GVL.MAX_STATE_MOTORS] OF ST_PositionState;
     stInvalidPos: ST_PositionState;
     nIterMotor: DINT;
 END_VAR]]></Declaration>
@@ -75,7 +75,7 @@ fbInput(
     bResetMove=>,
 );
 
-FOR nIterMotor := 1 TO MotionConstants.MAX_STATE_MOTORS DO
+FOR nIterMotor := 1 TO MotionConstants_GVL.MAX_STATE_MOTORS DO
     IF nCurrGoal > 0 THEN
         astMoveGoals[nIterMotor] := astPositionStateMax[nIterMotor][nCurrGoal];
     ELSE

@@ -12,7 +12,7 @@
 *)
 VAR_IN_OUT
     // All motors associated with the state mover.
-    astMotionStage: ARRAY[1..MotionConstants.MAX_STATE_MOTORS] OF ST_MotionStage;
+    astMotionStage: ARRAY[1..MotionConstants_GVL.MAX_STATE_MOTORS] OF ST_MotionStage;
     // Fast fault output to fault to.
     fbFFHWO: FB_HardwareFFOutput;
 END_VAR
@@ -27,7 +27,7 @@ VAR_OUTPUT
     bMotorCountError: BOOL;
 END_VAR
 VAR
-    afbEncError: ARRAY[1..MotionConstants.MAX_STATE_MOTORS] OF FB_EncErrorFFO;
+    afbEncError: ARRAY[1..MotionConstants_GVL.MAX_STATE_MOTORS] OF FB_EncErrorFFO;
     ffProgrammerError: FB_FastFault;
     nIter: DINT;
 END_VAR
@@ -46,7 +46,7 @@ HandleFFO();
         <ST><![CDATA[
 // Make sure the motor count is valid (positive, nonzero, less or equal to the max)
 bMotorCountError S= nActiveMotorCount <= 0;
-bMotorCountError S= nActiveMotorCount > MotionConstants.MAX_STATE_MOTORS;
+bMotorCountError S= nActiveMotorCount > MotionConstants_GVL.MAX_STATE_MOTORS;
 ]]></ST>
       </Implementation>
     </Action>

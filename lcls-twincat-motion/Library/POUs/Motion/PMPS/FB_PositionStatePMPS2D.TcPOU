@@ -81,8 +81,8 @@ END_VAR
 VAR
     fbCore: FB_PositionStateND_Core;
     fbPMPSCore: FB_PositionStatePMPSND_Core;
-    astMotionStageMax: ARRAY[1..MotionConstants.MAX_STATE_MOTORS] OF ST_MotionStage;
-    astPositionStateMax: ARRAY[1..MotionConstants.MAX_STATE_MOTORS] OF ARRAY[1..GeneralConstants.MAX_STATES] OF ST_PositionState;
+    astMotionStageMax: ARRAY[1..MotionConstants_GVL.MAX_STATE_MOTORS] OF ST_MotionStage;
+    astPositionStateMax: ARRAY[1..MotionConstants_GVL.MAX_STATE_MOTORS] OF ARRAY[1..GeneralConstants.MAX_STATES] OF ST_PositionState;
 END_VAR
 ]]></Declaration>
     <Implementation>
