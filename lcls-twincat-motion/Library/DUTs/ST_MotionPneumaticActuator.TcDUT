@@ -30,16 +30,16 @@ STRUCT
     {attribute 'pytmc' := '
     pv: bRetractDigitalOutput;
     io: i;
-    field: ONAM FALSE
-    field: ZNAM TRUE
+    field: ZNAM FALSE
+    field: ONAM TRUE
     field: DESC TRUE if Retract digital output is active
     '}
     q_bRetract    :    BOOL;
     {attribute 'pytmc' := '
     pv: bInsertDigitalOutput;
     io: i;
-    field: ONAM FALSE
-    field: ZNAM TRUE
+    field: ZNAM FALSE
+    field: ONAM TRUE
     field: DESC TRUE if Insert digital output is active
     '}
     q_bInsert    :    BOOL;
@@ -59,7 +59,7 @@ STRUCT
     io: i;
     field: ZNAM FALSE
     field: ONAM TRUE
-    field: DESC True if the actuator had permission to be retracted
+    field: DESC True if the actuator has permission to be inserted
     '}
     bInsertOK    :    BOOL;
     {attribute 'pytmc' := '
@@ -67,7 +67,7 @@ STRUCT
     io: i;
     field: ZNAM FALSE
     field: ONAM TRUE
-    field: DESC True if the actuator had permission to be inserted
+    field: DESC True if the actuator has permission to be retracted
     '}
     bRetractOK    :    BOOL;
 
@@ -91,8 +91,8 @@ STRUCT
     {attribute 'pytmc' := '
      pv: bBusy
      io: i
-     field: ONAM FALSE
-     field: ZNAM TRUE
+     field: ZNAM FALSE
+     field: ONAM TRUE
      field: DESC TRUE if in the middle of a command
     '}
     bBusy: BOOL;
@@ -100,8 +100,8 @@ STRUCT
     {attribute 'pytmc' := '
      pv: bDone
      io: i
-     field: ONAM FALSE
-     field: ZNAM TRUE
+     field: ZNAM FALSE
+     field: ONAM TRUE
       field: DESC TRUE if command finished successfully
     '}
     bDone: BOOL;
@@ -110,15 +110,15 @@ STRUCT
         io: io
         field: ZNAM FALSE
         field: ONAM TRUE
-        field: DESC Used internally to reset errors
+        field: DESC Set by EPICS to reset a latched error
     '}
     bReset: BOOL;
     // TRUE if we're in an error state
     {attribute 'pytmc' := '
      pv: PLC:bError
      io: i
-     field: ONAM FALSE
-     field: ZNAM TRUE
+     field: ZNAM FALSE
+     field: ONAM TRUE
      field: DESC TRUE if we're in an error state
     '}
     bError: BOOL;
