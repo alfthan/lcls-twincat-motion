@@ -1,0 +1,254 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="FB_MotionSetpointLimits_Test" Id="{2519f346-4c58-4d84-b7ee-caeba9c28d1a}" SpecialFunc="None">
+    <Declaration><![CDATA[FUNCTION_BLOCK FB_MotionSetpointLimits_Test EXTENDS TcUnit.FB_TestSuite
+(*
+    Unit tests for FB_MotionSetpointLimits.
+
+    The validator is driven directly with a plain ST_MotionStage and a fabricated NC
+    parameter set, so these tests need no axis, no drive and no hardware. They check
+    that a request beyond the configured limits is clamped into them, that an invalid
+    request is rejected while the last accepted setpoint is held, and that nothing is
+    touched at all before the axis parameters have been read.
+*)
+VAR
+    // Stage under test: only its setpoint and NC parameter fields are used here
+    stMotionStage: ST_MotionStage;
+    // Validator under test
+    fbSetpointLimits: FB_MotionSetpointLimits;
+END_VAR
+]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[TestClampSetpoints();
+TestRejectInvalidSetpoints();]]></ST>
+    </Implementation>
+    <Method Name="TestClampSetpoints" Id="{8f26c16e-a3fe-4c2a-85bb-f072923dd980}">
+      <Declaration><![CDATA[METHOD TestClampSetpoints
+]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[TEST('TestClampSetpoints');
+
+// The previously accepted setpoints, which a rejection must hold onto
+stMotionStage.fPosition := 1.0;
+stMotionStage.fHomePosition := 1.0;
+stMotionStage.fVelocity := 1.0;
+stMotionStage.fAcceleration := 1.0;
+stMotionStage.fDeceleration := 1.0;
+
+// Before the NC parameter set has been read there is no known limit, so the request
+// is passed through untouched and nothing is reported.
+stMotionStage.bAxisParamsInit := FALSE;
+fbSetpointLimits(
+    stMotionStage:=stMotionStage,
+    fPositionReq:=500.0,
+    fVelocityReq:=500.0,
+    fAccelerationReq:=500.0,
+    fDecelerationReq:=500.0,
+    fHomePositionReq:=500.0);
+AssertEquals_LREAL(
+    Expected:=500.0,
+    Actual:=fbSetpointLimits.fPosition,
+    Delta:=0.0,
+    Message:='A position request must pass through while no limits are known',
+);
+AssertEquals_LREAL(
+    Expected:=500.0,
+    Actual:=fbSetpointLimits.fVelocity,
+    Delta:=0.0,
+    Message:='A velocity request must pass through while no limits are known',
+);
+AssertFalse(
+    Condition:=fbSetpointLimits.bClamped,
+    Message:='Nothing can be clamped while no limits are known',
+);
+AssertFalse(
+    Condition:=fbSetpointLimits.bError,
+    Message:='An unchecked request must not be reported as an error',
+);
+
+// The axis now reports its configured limits and physical span
+stMotionStage.bAxisParamsInit := TRUE;
+stMotionStage.stAxisParameters.bEncEnableSoftEndMinControl := 1;
+stMotionStage.stAxisParameters.bEncEnableSoftEndMaxControl := 1;
+stMotionStage.stAxisParameters.fEncSoftEndMin := -10.0;
+stMotionStage.stAxisParameters.fEncSoftEndMax := 10.0;
+stMotionStage.stAxisParameters.fVeloMaximum := 5.0;
+stMotionStage.stAxisParameters.fAccelerationMax := 2.0;
+stMotionStage.stAxisParameters.fDecelerationMax := 3.0;
+
+// A request inside the limits is used as-is
+fbSetpointLimits(
+    stMotionStage:=stMotionStage,
+    fPositionReq:=5.0,
+    fVelocityReq:=2.5,
+    fAccelerationReq:=1.5,
+    fDecelerationReq:=2.5,
+    fHomePositionReq:=-5.0);
+AssertEquals_LREAL(
+    Expected:=5.0,
+    Actual:=fbSetpointLimits.fPosition,
+    Delta:=0.0,
+    Message:='An in-range position must not be modified',
+);
+AssertFalse(
+    Condition:=fbSetpointLimits.bClamped,
+    Message:='An in-range request must not be reported as clamped',
+);
+
+// A request beyond the limits is clamped into them instead of reaching the drive
+fbSetpointLimits(
+    stMotionStage:=stMotionStage,
+    fPositionReq:=25.0,
+    fVelocityReq:=50.0,
+    fAccelerationReq:=20.0,
+    fDecelerationReq:=30.0,
+    fHomePositionReq:=-25.0);
+AssertEquals_LREAL(
+    Expected:=10.0,
+    Actual:=fbSetpointLimits.fPosition,
+    Delta:=0.0,
+    Message:='A position beyond the positive soft end limit must be clamped',
+);
+AssertEquals_LREAL(
+    Expected:=-10.0,
+    Actual:=fbSetpointLimits.fHomePosition,
+    Delta:=0.0,
+    Message:='A home position below the negative soft end limit must be clamped',
+);
+AssertEquals_LREAL(
+    Expected:=5.0,
+    Actual:=fbSetpointLimits.fVelocity,
+    Delta:=0.0,
+    Message:='A velocity beyond the axis maximum must be clamped',
+);
+AssertEquals_LREAL(
+    Expected:=2.0,
+    Actual:=fbSetpointLimits.fAcceleration,
+    Delta:=0.0,
+    Message:='An acceleration beyond the axis maximum must be clamped',
+);
+AssertEquals_LREAL(
+    Expected:=3.0,
+    Actual:=fbSetpointLimits.fDeceleration,
+    Delta:=0.0,
+    Message:='A deceleration beyond the axis maximum must be clamped',
+);
+AssertTrue(
+    Condition:=fbSetpointLimits.bClamped,
+    Message:='Clamping must be reported',
+);
+AssertFalse(
+    Condition:=fbSetpointLimits.bError,
+    Message:='A clamped setpoint is a bounded move, not a fault',
+);
+
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="TestRejectInvalidSetpoints" Id="{fa184f4f-b647-445b-a92b-f2330c8dbe40}">
+      <Declaration><![CDATA[METHOD TestRejectInvalidSetpoints
+]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[TEST('TestRejectInvalidSetpoints');
+
+// The configured limits and the previously accepted setpoints
+stMotionStage.bAxisParamsInit := TRUE;
+stMotionStage.stAxisParameters.bEncEnableSoftEndMinControl := 1;
+stMotionStage.stAxisParameters.bEncEnableSoftEndMaxControl := 1;
+stMotionStage.stAxisParameters.fEncSoftEndMin := -10.0;
+stMotionStage.stAxisParameters.fEncSoftEndMax := 10.0;
+stMotionStage.stAxisParameters.fVeloMaximum := 5.0;
+stMotionStage.stAxisParameters.fAccelerationMax := 2.0;
+stMotionStage.stAxisParameters.fDecelerationMax := 3.0;
+stMotionStage.fPosition := 3.0;
+stMotionStage.fHomePosition := 2.0;
+stMotionStage.fVelocity := 4.0;
+stMotionStage.fAcceleration := 1.0;
+stMotionStage.fDeceleration := 1.5;
+
+// A magnitude beyond any physical span is what a NaN or an infinity looks like to the
+// validator, and a velocity, acceleration or deceleration of zero or below cannot be
+// executed. Each of these is rejected and the previous setpoint is held.
+fbSetpointLimits(
+    stMotionStage:=stMotionStage,
+    fPositionReq:=1.0E308,
+    fVelocityReq:=0.0,
+    fAccelerationReq:=1.0E308,
+    fDecelerationReq:=-1.0,
+    fHomePositionReq:=1.0E308);
+AssertEquals_LREAL(
+    Expected:=3.0,
+    Actual:=fbSetpointLimits.fPosition,
+    Delta:=0.0,
+    Message:='A non-finite position must hold the previous setpoint',
+);
+AssertEquals_LREAL(
+    Expected:=2.0,
+    Actual:=fbSetpointLimits.fHomePosition,
+    Delta:=0.0,
+    Message:='A non-finite home position must hold the previous setpoint',
+);
+AssertEquals_LREAL(
+    Expected:=4.0,
+    Actual:=fbSetpointLimits.fVelocity,
+    Delta:=0.0,
+    Message:='A velocity of zero must hold the previous setpoint',
+);
+AssertEquals_LREAL(
+    Expected:=1.0,
+    Actual:=fbSetpointLimits.fAcceleration,
+    Delta:=0.0,
+    Message:='A non-finite acceleration must hold the previous setpoint',
+);
+AssertEquals_LREAL(
+    Expected:=1.5,
+    Actual:=fbSetpointLimits.fDeceleration,
+    Delta:=0.0,
+    Message:='A negative deceleration must hold the previous setpoint',
+);
+AssertTrue(
+    Condition:=fbSetpointLimits.bRejected,
+    Message:='A rejected request must be reported',
+);
+AssertTrue(
+    Condition:=fbSetpointLimits.bError,
+    Message:='A rejected request must raise the error output',
+);
+AssertEquals_UDINT(
+    Expected:=E_LCLSMotionError.INVALID,
+    Actual:=fbSetpointLimits.nErrorId,
+    Message:='A rejected request must report the invalid-value error',
+);
+AssertTrue(
+    Condition:=fbSetpointLimits.sErrorMessage <> '',
+    Message:='A rejected request must say which setpoint was rejected',
+);
+
+// A later valid request clears the rejection report, so a caller that latched the
+// error keeps the value it latched and can clear it with a reset.
+fbSetpointLimits(
+    stMotionStage:=stMotionStage,
+    fPositionReq:=5.0,
+    fVelocityReq:=2.5,
+    fAccelerationReq:=1.0,
+    fDecelerationReq:=1.5,
+    fHomePositionReq:=2.0);
+AssertFalse(
+    Condition:=fbSetpointLimits.bRejected,
+    Message:='A valid request must not be reported as rejected',
+);
+AssertFalse(
+    Condition:=fbSetpointLimits.bError,
+    Message:='A valid request must clear the error output',
+);
+AssertEquals_UDINT(
+    Expected:=0,
+    Actual:=fbSetpointLimits.nErrorId,
+    Message:='A valid request must clear the error id',
+);
+
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+  </POU>
+</TcPlcObject>

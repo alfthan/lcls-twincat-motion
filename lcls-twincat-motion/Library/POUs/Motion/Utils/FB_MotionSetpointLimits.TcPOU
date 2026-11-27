@@ -1,0 +1,215 @@
+<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="FB_MotionSetpointLimits" Id="{34221850-90cf-45e5-b7b8-b5358602dcd2}" SpecialFunc="None">
+    <Declaration><![CDATA[FUNCTION_BLOCK FB_MotionSetpointLimits
+(*
+    FB_MotionSetpointLimits
+    Validates the requested motion setpoints against the configured limits of a stage
+    and the physical span of its drive, before they can be written to the axis.
+
+    Purpose:
+        A requested position, velocity or acceleration that comes from outside the PLC
+        (EPICS command values) must never be passed to the drive unchecked: an
+        out-of-range or mistyped value would become an over-speed move or a drive fault
+        instead of a bounded move. This block is the single place that compares such a
+        request with the limits that are actually configured for the axis.
+
+    Usage:
+        Call once per PLC cycle, before assigning the request to ST_MotionStage, and use
+        the outputs instead of the raw request:
+
+            fbSetpointLimits(
+                stMotionStage:=stMotionStage,
+                fPositionReq:=stMotionCmdNow.fPosition,
+                fVelocityReq:=stMotionCmdNow.fVelocity,
+                fAccelerationReq:=stMotionCmdNow.fAcceleration,
+                fDecelerationReq:=stMotionCmdNow.fDeceleration,
+                fHomePositionReq:=stMotionCmdNow.fHomePosition);
+
+        bClamped reports that an output was pulled back into range. bError/nErrorId/
+        sErrorMessage report a rejected request; the caller is responsible for latching
+        that error until it is acknowledged.
+
+    Objectives:
+        - Position and home position are clamped into the NC static soft end limits
+          when the NC reports both of them as enabled.
+        - Velocity, acceleration and deceleration are clamped to the NC maximum values.
+        - A non-finite request (NaN or an infinity) is rejected and the previously
+          accepted setpoint is held, so a corrupt value can never reach the drive.
+        - A velocity, acceleration or deceleration request of zero or below is rejected
+          as well; the axis cannot execute it and the sign of a velocity must never be
+          flipped silently.
+        - The limits are read from the NC axis parameter set, which FB_MotionStageNCParams
+          refreshes on ST_MotionStage. Until the axis parameters have been read at least
+          once (bAxisParamsInit) no limit is known and the request is passed through
+          untouched, exactly as before this block existed. bEnable overrides the whole
+          check for callers that do their own validation.
+
+    History:
+        Author/Date unknown - initial version
+        2026-11-27 - created to clamp/reject externally supplied motion setpoints
+*)
+VAR_IN_OUT
+    // Stage whose NC parameter set supplies the configured limits and drive span
+    stMotionStage: ST_MotionStage;
+END_VAR
+VAR_INPUT
+    // TRUE to validate the request, FALSE to pass every request through untouched
+    bEnable: BOOL := TRUE;
+    // Requested position setpoint in engineering units
+    fPositionReq: LREAL;
+    // Requested velocity setpoint in engineering units per second
+    fVelocityReq: LREAL;
+    // Requested acceleration setpoint in engineering units per second squared
+    fAccelerationReq: LREAL;
+    // Requested deceleration setpoint in engineering units per second squared
+    fDecelerationReq: LREAL;
+    // Requested home position setpoint in engineering units
+    fHomePositionReq: LREAL;
+END_VAR
+VAR_OUTPUT
+    // Validated position setpoint: clamped, or the held previous value if rejected
+    fPosition: LREAL;
+    // Validated velocity setpoint: clamped, or the held previous value if rejected
+    fVelocity: LREAL;
+    // Validated acceleration setpoint: clamped, or the held previous value if rejected
+    fAcceleration: LREAL;
+    // Validated deceleration setpoint: clamped, or the held previous value if rejected
+    fDeceleration: LREAL;
+    // Validated home position setpoint: clamped, or the held previous value if rejected
+    fHomePosition: LREAL;
+    // TRUE if a request was outside the configured limits and was clamped
+    bClamped: BOOL;
+    // TRUE if a request was invalid and was rejected, holding the previous setpoint
+    bRejected: BOOL;
+    // TRUE while the current request was rejected
+    bError: BOOL;
+    // E_LCLSMotionError.INVALID when a request was rejected, 0 otherwise
+    nErrorId: UDINT;
+    // Which request was rejected and why, empty when nothing was rejected
+    sErrorMessage: STRING;
+END_VAR
+VAR
+    // TRUE when the NC reports usable soft end limits for this axis
+    bPositionLimits: BOOL;
+    // TRUE when the NC reports a usable maximum velocity for this axis
+    bVelocityLimits: BOOL;
+    // TRUE when the NC reports a usable maximum acceleration for this axis
+    bAccelerationLimits: BOOL;
+    // TRUE when the NC reports a usable maximum deceleration for this axis
+    bDecelerationLimits: BOOL;
+END_VAR
+]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[// Default: every request passes through unchanged. A value that cannot be checked
+// must never be replaced by something else silently, and the caller decides what to
+// do with the rejection reported below.
+bClamped := FALSE;
+bRejected := FALSE;
+bError := FALSE;
+nErrorId := 0;
+sErrorMessage := '';
+fPosition := fPositionReq;
+fVelocity := fVelocityReq;
+fAcceleration := fAccelerationReq;
+fDeceleration := fDecelerationReq;
+fHomePosition := fHomePositionReq;
+
+IF NOT bEnable THEN
+    RETURN;
+END_IF
+
+// The NC axis parameter set is the configured limit set and the physical span of this
+// drive: the static soft end positions plus the maximum dynamics. It is only usable
+// once the axis parameters have been read at least once (see FB_MotionStageNCParams),
+// so an axis that has never answered keeps the previous pass-through behaviour.
+bPositionLimits :=
+    stMotionStage.bAxisParamsInit
+    AND stMotionStage.stAxisParameters.bEncEnableSoftEndMinControl <> 0
+    AND stMotionStage.stAxisParameters.bEncEnableSoftEndMaxControl <> 0
+    AND stMotionStage.stAxisParameters.fEncSoftEndMax > stMotionStage.stAxisParameters.fEncSoftEndMin;
+bVelocityLimits := stMotionStage.bAxisParamsInit AND stMotionStage.stAxisParameters.fVeloMaximum > 0.0;
+bAccelerationLimits := stMotionStage.bAxisParamsInit AND stMotionStage.stAxisParameters.fAccelerationMax > 0.0;
+bDecelerationLimits := stMotionStage.bAxisParamsInit AND stMotionStage.stAxisParameters.fDecelerationMax > 0.0;
+
+// Position setpoint: reject a non-finite value, otherwise clamp it into the soft end limits
+IF NOT F_LRealIsFinite(fValue := fPositionReq) THEN
+    fPosition := stMotionStage.fPosition;
+    bRejected := TRUE;
+    sErrorMessage := 'Rejected non-finite position setpoint';
+ELSIF bPositionLimits THEN
+    IF fPosition > stMotionStage.stAxisParameters.fEncSoftEndMax THEN
+        fPosition := stMotionStage.stAxisParameters.fEncSoftEndMax;
+        bClamped := TRUE;
+    ELSIF fPosition < stMotionStage.stAxisParameters.fEncSoftEndMin THEN
+        fPosition := stMotionStage.stAxisParameters.fEncSoftEndMin;
+        bClamped := TRUE;
+    END_IF
+END_IF
+
+// Home position setpoint: the same treatment, it is handed to the axis as a position too
+IF NOT F_LRealIsFinite(fValue := fHomePositionReq) THEN
+    fHomePosition := stMotionStage.fHomePosition;
+    bRejected := TRUE;
+    sErrorMessage := 'Rejected non-finite home position setpoint';
+ELSIF bPositionLimits THEN
+    IF fHomePosition > stMotionStage.stAxisParameters.fEncSoftEndMax THEN
+        fHomePosition := stMotionStage.stAxisParameters.fEncSoftEndMax;
+        bClamped := TRUE;
+    ELSIF fHomePosition < stMotionStage.stAxisParameters.fEncSoftEndMin THEN
+        fHomePosition := stMotionStage.stAxisParameters.fEncSoftEndMin;
+        bClamped := TRUE;
+    END_IF
+END_IF
+
+// Velocity setpoint: must be finite and strictly positive, and may not exceed the drive maximum
+IF NOT F_LRealIsFinite(fValue := fVelocityReq) THEN
+    fVelocity := stMotionStage.fVelocity;
+    bRejected := TRUE;
+    sErrorMessage := 'Rejected non-finite velocity setpoint';
+ELSIF fVelocityReq <= 0.0 THEN
+    fVelocity := stMotionStage.fVelocity;
+    bRejected := TRUE;
+    sErrorMessage := 'Rejected velocity setpoint of zero or below';
+ELSIF bVelocityLimits AND (fVelocity > stMotionStage.stAxisParameters.fVeloMaximum) THEN
+    fVelocity := stMotionStage.stAxisParameters.fVeloMaximum;
+    bClamped := TRUE;
+END_IF
+
+// Acceleration setpoint: must be finite and strictly positive, and may not exceed the drive maximum
+IF NOT F_LRealIsFinite(fValue := fAccelerationReq) THEN
+    fAcceleration := stMotionStage.fAcceleration;
+    bRejected := TRUE;
+    sErrorMessage := 'Rejected non-finite acceleration setpoint';
+ELSIF fAccelerationReq <= 0.0 THEN
+    fAcceleration := stMotionStage.fAcceleration;
+    bRejected := TRUE;
+    sErrorMessage := 'Rejected acceleration setpoint of zero or below';
+ELSIF bAccelerationLimits AND (fAcceleration > stMotionStage.stAxisParameters.fAccelerationMax) THEN
+    fAcceleration := stMotionStage.stAxisParameters.fAccelerationMax;
+    bClamped := TRUE;
+END_IF
+
+// Deceleration setpoint: must be finite and strictly positive, and may not exceed the drive maximum
+IF NOT F_LRealIsFinite(fValue := fDecelerationReq) THEN
+    fDeceleration := stMotionStage.fDeceleration;
+    bRejected := TRUE;
+    sErrorMessage := 'Rejected non-finite deceleration setpoint';
+ELSIF fDecelerationReq <= 0.0 THEN
+    fDeceleration := stMotionStage.fDeceleration;
+    bRejected := TRUE;
+    sErrorMessage := 'Rejected deceleration setpoint of zero or below';
+ELSIF bDecelerationLimits AND (fDeceleration > stMotionStage.stAxisParameters.fDecelerationMax) THEN
+    fDeceleration := stMotionStage.stAxisParameters.fDecelerationMax;
+    bClamped := TRUE;
+END_IF
+
+// A rejected request is the axis-level "invalid" fault; the caller latches it
+IF bRejected THEN
+    bError := TRUE;
+    nErrorId := E_LCLSMotionError.INVALID;
+END_IF
+]]></ST>
+    </Implementation>
+  </POU>
+</TcPlcObject>

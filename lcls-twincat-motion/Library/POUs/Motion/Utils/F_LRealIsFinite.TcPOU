@@ -1,0 +1,44 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="F_LRealIsFinite" Id="{ffe5077d-9ac4-4ae0-8987-5f632a01e42f}" SpecialFunc="None">
+    <Declaration><![CDATA[FUNCTION F_LRealIsFinite : BOOL
+(*
+    F_LRealIsFinite
+    Reports whether an LREAL is an ordinary, finite number.
+
+    Purpose:
+        Setpoints that arrive from outside the PLC (EPICS writes, linked values) can
+        carry a non-finite LREAL. TwinCAT does not fault on such a value, so without a
+        test it would be handed straight to the axis as a position or a velocity.
+        Every setpoint check has to screen for this before it compares magnitudes.
+
+    Usage:
+        IF NOT F_LRealIsFinite(fValue := stMotionCmdNow.fPosition) THEN
+            // reject, hold the previous setpoint
+        END_IF
+
+    Objectives:
+        TRUE for finite values only; FALSE for NaN and for both infinities.
+        A NaN is detected through the comparisons rather than by comparing the value
+        with itself: every comparison against a NaN is FALSE, so such a value is
+        neither above the lower magnitude bound nor below the upper one.
+
+    History:
+        Author/Date unknown - initial version
+        2026-11-27 - created for motion setpoint validation (reject non-finite setpoints)
+*)
+VAR_INPUT
+    // Value to inspect
+    fValue: LREAL;
+END_VAR
+VAR CONSTANT
+    // A magnitude beyond this cannot be a physical setpoint; it is either an
+    // infinity or was produced from a NaN
+    fMagnitudeLimit: LREAL := 1.0E308;
+END_VAR
+]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[F_LRealIsFinite := (fValue > -fMagnitudeLimit) AND (fValue < fMagnitudeLimit);]]></ST>
+    </Implementation>
+  </POU>
+</TcPlcObject>

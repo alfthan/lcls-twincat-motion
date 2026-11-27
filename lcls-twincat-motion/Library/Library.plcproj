@@ -483,6 +483,12 @@
     <Compile Include="POUs\Motion\Utils\F_MotionErrorCodeLookup.TcPOU">
       <SubType>Code</SubType>
     </Compile>
+    <Compile Include="POUs\Motion\Utils\FB_MotionSetpointLimits.TcPOU">
+      <SubType>Code</SubType>
+    </Compile>
+    <Compile Include="POUs\Motion\Utils\F_LRealIsFinite.TcPOU">
+      <SubType>Code</SubType>
+    </Compile>
     <Compile Include="POUs\MotorTesting\FB_MicroStepCountTest.TcPOU">
       <SubType>Code</SubType>
     </Compile>
@@ -682,6 +688,9 @@
       <SubType>Code</SubType>
     </Compile>
     <Compile Include="Tests\FB_MotionBacklashCompensation_Test.TcPOU">
+      <SubType>Code</SubType>
+    </Compile>
+    <Compile Include="Tests\FB_MotionSetpointLimits_Test.TcPOU">
       <SubType>Code</SubType>
     </Compile>
     <Compile Include="Tests\FB_StatePMPSEnablesND_Test.TcPOU">

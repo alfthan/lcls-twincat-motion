@@ -31,6 +31,8 @@ VAR
     bNegGoal: BOOL;
     fbEncoderValue: FB_EncoderValue;
     fbNCParams: FB_MotionStageNCParams;
+    // Validates and clamps the externally supplied setpoints before they reach the axis
+    fbSetpointLimits: FB_MotionSetpointLimits;
     bNewMoveReq: BOOL;
     bPrepareDisable: BOOL;
     bMoveCmd: BOOL;
@@ -57,6 +59,27 @@ IF NOT __ISVALIDREF(stMotionStage) THEN
 END_IF
 
 // Main Motion Command Structure
+// The command values in this structure are written from outside the PLC (EPICS), so
+// they are validated against the configured limits of this stage and the physical span
+// of the drive before they can become a setpoint request to the axis. A clamped value
+// is carried into stMotionStage below; a rejected value holds the last accepted
+// setpoint and latches an error here, so an out-of-range or non-finite command can
+// never be handed to the drive.
+fbSetpointLimits(
+    stMotionStage:=stMotionStage,
+    bEnable:=TRUE,
+    fPositionReq:=stMotionCmdNow.fPosition,
+    fVelocityReq:=stMotionCmdNow.fVelocity,
+    fAccelerationReq:=stMotionCmdNow.fAcceleration,
+    fDecelerationReq:=stMotionCmdNow.fDeceleration,
+    fHomePositionReq:=stMotionCmdNow.fHomePosition);
+
+IF fbSetpointLimits.bError AND NOT stMotionStage.bError THEN
+    stMotionStage.bError := TRUE;
+    stMotionStage.nErrorId := fbSetpointLimits.nErrorId;
+    stMotionStage.sCustomErrorMessage := fbSetpointLimits.sErrorMessage;
+END_IF
+
 IF stMotionCmdNow.bHalt <> stMotionCmdPrev.bHalt THEN
     stMotionStage.bExecute := NOT stMotionCmdNow.bHalt;
 END_IF
@@ -70,22 +93,22 @@ IF stMotionCmdNow.bReset <> stMotionCmdPrev.bReset THEN
     stMotionStage.bReset := stMotionCmdNow.bReset;
 END_IF
 IF stMotionCmdNow.fAcceleration <> stMotionCmdPrev.fAcceleration THEN
-    stMotionStage.fAcceleration := stMotionCmdNow.fAcceleration;
+    stMotionStage.fAcceleration := fbSetpointLimits.fAcceleration;
 END_IF
 IF stMotionCmdNow.fDeceleration <> stMotionCmdPrev.fDeceleration THEN
-    stMotionStage.fDeceleration := stMotionCmdNow.fDeceleration;
+    stMotionStage.fDeceleration := fbSetpointLimits.fDeceleration;
 END_IF
 IF stMotionCmdNow.fHomePosition <> stMotionCmdPrev.fHomePosition THEN
-    stMotionStage.fHomePosition := stMotionCmdNow.fHomePosition;
+    stMotionStage.fHomePosition := fbSetpointLimits.fHomePosition;
 END_IF
 IF stMotionCmdNow.fJerk <> stMotionCmdPrev.fJerk THEN
     //stMotionStage.fJerk := stMotionCmdNow.fJerk; NOT SUPPORTED BY THIS IMPLEMENTATION
 END_IF
 IF stMotionCmdNow.fPosition <> stMotionCmdPrev.fPosition THEN
-    stMotionStage.fPosition := stMotionCmdNow.fPosition;
+    stMotionStage.fPosition := fbSetpointLimits.fPosition;
 END_IF
 IF stMotionCmdNow.fVelocity <> stMotionCmdPrev.fVelocity THEN
-    stMotionStage.fVelocity := stMotionCmdNow.fVelocity;
+    stMotionStage.fVelocity := fbSetpointLimits.fVelocity;
 END_IF
 IF stMotionCmdNow.nCmdData <> stMotionCmdPrev.nCmdData THEN
     stMotionStage.nCmdData := stMotionCmdNow.nCmdData;
