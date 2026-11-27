@@ -10,10 +10,19 @@
 *)
 FUNCTION F_MCS2ErrorCodeLookup : STRING
 VAR_INPUT
+    // Error code read from the drive's Error Code object (0x603F). A dimensionless
+    // 16-bit DS402 code, not a scaled value and not an NC nErrorId, e.g. 16#8611.
+    // A value of 16#0000 means the drive reports no error.
     nErrorId : UINT;
 END_VAR
 VAR
+    // Decoded message text for nErrorId, in English, with no units.
+    // Working buffer only - every CASE branch assigns it and it is then returned
+    // as the function result, so an empty string means there is no error to report.
     msg : STRING;
+    // DS402 error class, used by the fallback branch only. It is the high byte of
+    // nErrorId (nErrorId / 256), a dimensionless 8-bit value, e.g. 16#86 for any
+    // code in the 16#86xx movement-error family.
     nClass : BYTE;
 END_VAR
 ]]></Declaration>
