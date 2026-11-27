@@ -1,10 +1,66 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <TcPlcObject Version="1.1.0.1">
   <DUT Name="ST_PositionState" Id="{85d45494-8a84-426c-8efe-9136ee5821c6}">
     <Declaration><![CDATA[TYPE ST_PositionState :
-    // Defines settings and current safety status for moves to specific positions for an axis
+    (*
+        ST_PositionState - one named target position ("state") of a motion axis.
+
+        PURPOSE
+            Describes a single named position of a motor/axis together with the
+            motion parameters needed to reach it and the flags that decide
+            whether a move to it is currently allowed. An array of these
+            (ARRAY[1..GeneralConstants.MAX_STATES] OF ST_PositionState) is held
+            in the PLC program and is what the states function blocks
+            (FB_PositionState1D/2D/3D, FB_PositionStateMove,
+            FB_PositionStateRead, and the FB_PositionStatePMPS* blocks) loop over to decide
+            where an axis may move, how fast, and whether it is currently there.
+
+        USAGE
+            The PLC program fills the struct in at startup, normally via
+            FB_StateSetupHelper: one call with bSetDefault:=TRUE applies a
+            template state to every array entry, then one call per state sets
+            sName, fPosition, fDelta, fVelocity and the remaining members. The
+            struct is then passed by reference (VAR_IN_OUT) into the states
+            function blocks, which every cycle set bUpdated and derive
+            whichever of fPosition / nEncoderCount was not supplied (see
+            FB_PositionStateInternal). Members whose pytmc pragma declares
+            io: io can additionally be written from EPICS while the state is
+            not locked (bLocked, enforced by FB_PositionStateLock).
+
+        OBJECTIVES
+            - Keep the target position in the two representations the library
+              needs: engineering units (fPosition) for moves and at-position
+              comparisons, and raw encoder counts (nEncoderCount) for
+              count-based setups.
+            - Carry the safety decision for the state inside the struct itself
+              (bMoveOk, bValid, bLocked), so a move can never be started
+              towards a state that the PLC program has not explicitly blessed.
+            - Keep the name and motion parameters of a position in one
+              reviewable place (sName, fVelocity, fAccel, fDecel, fDelta)
+              instead of repeating them at each call site.
+            - Expose name, setpoint, velocity and encoder count to EPICS via
+              pytmc pragmas, so every state appears as its own set of PVs.
+            - Provide the PMPS lookup key (stPMPS.sPmpsState) that ties the
+              state to the beam-parameter requirement it is allowed at.
+
+        HISTORY
+            2019-07-17 / Zachary Lentz
+                Created as DUT_PositionState together with the first
+                point-to-point state move function block.
+            2022-11-11 / Zachary Lentz
+                Added sPmpsState, used as the PMPS database lookup key.
+            2023-03-15 / Zachary Lentz
+                Renamed to ST_PositionState; DUT_PositionState remains as a
+                deprecated alias for backwards compatibility.
+            2025-10-30 / Josue Zamudio
+                Added pytmc pragmas enabling autosave on selected PVs.
+            2026-11-27 / Scirix Agent
+                Added this header and the per-member meaning/units comments;
+                documentation only, no behaviour change (audit finding #828,
+                convention conv_321640e095c0).
+    *)
 STRUCT
-    // Name as queried via the NAME PV in EPICS
+    // Name of this position state, as queried via the NAME PV in EPICS (text, no unit)
     {attribute 'pytmc' := '
         pv: NAME
         io: input
@@ -12,7 +68,7 @@ STRUCT
     '}
     sName: STRING := 'Invalid';
 
-    // Position associated with this state
+    // Position associated with this state, in engineering units (EGU) of the axis
     {attribute 'pytmc' := '
         pv: SETPOINT
         io: io
@@ -21,6 +77,14 @@ STRUCT
     '}
     fPosition: LREAL;
 
+    // Raw encoder count associated with this state, in encoder counts - not EGU.
+    // Same representation as ST_MotionStage.nEncoderCount. Both fields are two
+    // views of the same position and are kept consistent using the axis
+    // parameters (fPosition = nEncoderCount * fEncScaleFactorInternal +
+    // fEncOffset, see FB_RawCountConverter): if bUseRawCounts is TRUE this
+    // member is the authority and fPosition is recalculated from it, otherwise
+    // fPosition is the authority and this member is recalculated from it.
+    // See also FB_PositionStateInternal.
     {attribute 'pytmc' := '
         pv: ENCODER
         io: i
@@ -28,10 +92,10 @@ STRUCT
     '}
     nEncoderCount: UDINT;
 
-    // Maximum allowable deviation from fPosition while at the state
+    // Maximum allowable deviation from fPosition while at the state, in EGU
     fDelta: LREAL;
 
-    // Speed at which to move to this state
+    // Speed at which to move to this state, in EGU/s
     {attribute 'pytmc' := '
         pv: VELO
         io: io
@@ -40,10 +104,10 @@ STRUCT
     '}
     fVelocity: LREAL;
 
-    // (optional) Acceleration to use for moves to this state
+    // (optional) Acceleration to use for moves to this state, in EGU/s^2
     fAccel: LREAL;
 
-    // (optional) Deceleration to use for moves to this state
+    // (optional) Deceleration to use for moves to this state, in EGU/s^2
     fDecel: LREAL;
 
     // Safety parameter. This must be set to TRUE by the PLC program to allow moves to this state. This is expected to change as conditions change.
@@ -62,7 +126,10 @@ STRUCT
     // Set this to TRUE when you make your state. This defaults to FALSE so that uninitialized states can never be moved to
     bValid: BOOL;
 
-    // Set this to TRUE when you want to use the raw encoder counts to define the state
+    // Set this to TRUE when you want to use the raw encoder counts to define the
+    // state: nEncoderCount is then the authority and fPosition is derived from
+    // it. When FALSE, fPosition is the authority and nEncoderCount is derived
+    // from it.
     bUseRawCounts: BOOL;
 
     // Is set to TRUE by FB_PositionStateInternal when called
