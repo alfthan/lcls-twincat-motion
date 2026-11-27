@@ -2,27 +2,88 @@
 <TcPlcObject Version="1.1.0.1">
   <POU Name="FB_MCS2Calibrate" Id="{4b86a6e1-43f7-489f-9e64-44b7835fe9ac}" SpecialFunc="None">
     <Declaration><![CDATA[FUNCTION_BLOCK FB_MCS2Calibrate
+(*
+    Purpose:
+        Drive the SmarAct MCS2 safe-direction calibration (referencing) move of
+        one DS402 channel and report its progress to the caller.
+
+    Usage:
+        Instantiated once per MCS2 channel by FB_MotionStageMCS2 and called every
+        cycle from that block's E_MCS2OpMode.CALIBRATE branch. Raise bExecute on
+        a rising edge to start a calibration move, watch bCalibrateMoveBusy while
+        it runs, and read bCalibrateMoveDone or bCalibrateMoveAborted when it
+        finishes. Halt() requests a user-stop and Reset() an abort, both of a move
+        in progress. The block does not latch the outcome for the caller: the caller
+        copies Done/Aborted into its own state (stMotionStage.bDone / bError) and
+        must drop bExecute before a new rising edge is accepted.
+
+    Objectives:
+        - Non-blocking: the sequence is an explicit E_MoveState state machine
+          with one action per state, so it never stalls the PLC cycle.
+        - Always run the full calibration, even when the drive already reports
+          Calibration Attained (Bit12), because a Safe-Direction change
+          invalidates the stored calibration while leaving Bit12 set.
+        - Accept the attained bit only after the move has settled
+          (tonSettlingTime, currently T#80MS) and TargetReached is set, so a
+          stale status word is not mistaken for a finished move.
+        - Bound every outcome: Done, Aborted and Error all leave the state
+          machine in a defined state with bCalibrateMoveBusy FALSE.
+        - Drive the channel over the fieldbus only - this block never commands
+          the NC axis.
+
+    History:
+        2025-10-28  Y. S. Mandza   Created - split out of FB_MotionStageMCS2.
+        2026-11-27  Audit fix      Header and declaration comments added; Halt()
+                                   and Reset() now set their documented return
+                                   value; a new move clears the previous abort
+                                   flag. No change to the move itself.
+*)
 VAR_INPUT
+    // Start a calibration move on a rising edge. Hold it high across the move
+    // and drop it after bCalibrateMoveDone/-Aborted before requesting the next
+    // one: the trigger is edge based, so a level that never falls is not re-run.
     bExecute : BOOL;
 END_VAR
 VAR_IN_OUT
+    // DS402 channel I/O of the drive this move drives. The block sets the
+    // calibration-enable bit (nDriveControl.3) and the run bit
+    // (nDriveControl.4), and reads TargetReached, Bit12 (calibration attained)
+    // and Bit13 (calibration fault) from stDriveStatus. Must be bound - the
+    // block returns immediately if the reference is invalid.
     stDS402Drive         : ST_DS402Drive;
+    // Stage interface shared with the NC/EPICS layer of this motor. The block
+    // only sets bError (drive fault, decoded by the caller) and reads bDone (to
+    // leave the DONE state once the caller has consumed the result).
     stMotionStage        : ST_MotionStage;
 END_VAR
 
 VAR_OUTPUT
+    // TRUE from the accepted execute edge until the move is done, aborted or in
+    // error. The caller ORs this into stMotionStage.bBusy.
     bCalibrateMoveBusy        : BOOL;
+    // TRUE once the move settled and the drive reported Calibration Attained.
+    // Held until the caller acknowledges through stMotionStage.bDone.
     bCalibrateMoveDone        : BOOL;
+    // TRUE once Halt() or Reset() interrupted a running calibration move. Held
+    // until the next move starts, so the caller can edge-detect the abort.
     bCalibrateMoveAborted     : BOOL;
 END_VAR
 VAR
+    // State machine step of this block, one action per state; starts IDLING.
     eStepState	: E_MoveState := E_MoveState.IDLING;
+    // One-cycle abort request raised by Reset(). Also aborts a running move; the
+    // state machine clears the flag on the same cycle.
     {attribute 'hide'}
     bReset :  BOOL;
+    // One-cycle stop request raised by Halt(). Also aborts a running move; the
+    // state machine clears the flag on the same cycle.
     {attribute 'hide'}
     bHalt : BOOL;
+    // Settling delay that must elapse (PT set in the body, currently T#80MS)
+    // before TargetReached and the attained bit are accepted as final.
     {attribute 'hide'}
     tonSettlingTime     : TON;
+    // Detects the rising edge of bExecute that starts a calibration move.
     {attribute 'hide'}
     rtCalibrateMove: R_TRIG;
 END_VAR
@@ -41,6 +102,7 @@ CASE eStepState OF
         IF rtCalibrateMove.Q THEN
             bCalibrateMoveBusy := TRUE;
             bCalibrateMoveDone := FALSE;
+            bCalibrateMoveAborted := FALSE;
             // Set bits 0-3 for calibration enable
             stDS402Drive.nDriveControl.3 := TRUE;
             eStepState := E_MoveState.INIT;
@@ -100,20 +162,73 @@ bReset := FALSE;]]></ST>
     </Implementation>
     <Method Name="Halt" Id="{054cef2f-a2aa-4334-b8f8-3db255f14cab}">
       <Declaration><![CDATA[METHOD Halt : BOOL
+(*
+    Purpose:
+        Request a stop of a calibration move that is in progress.
+
+    Usage:
+        Called from the caller's stop handling, e.g. when the operator drops the
+        execute signal mid-move. The call sets the internal bHalt flag, which the
+        state machine consumes and clears on its next cycle, so one call is
+        enough. A move that is not in progress is unaffected.
+
+    Objectives:
+        - Stop the move without blocking the PLC cycle.
+        - Report the stop as an abort (bCalibrateMoveAborted), not as a fault, so
+          a deliberate user stop is not latched as an error.
+
+    Returns:
+        TRUE when the request was registered. The stop is asynchronous: it does
+        not mean the move has already stopped, so wait for bCalibrateMoveAborted
+        (or for bCalibrateMoveBusy to fall).
+
+    History:
+        2025-10-28  Y. S. Mandza   Created - split out of FB_MotionStageMCS2.
+        2026-11-27  Audit fix      Header and return value documented; the return
+                                   value is now assigned.
+*)
 VAR_INPUT
 END_VAR
 ]]></Declaration>
       <Implementation>
-        <ST><![CDATA[THIS^.bHalt := TRUE;]]></ST>
+        <ST><![CDATA[THIS^.bHalt := TRUE;
+Halt := TRUE;]]></ST>
       </Implementation>
     </Method>
     <Method Name="Reset" Id="{9e18e8d8-fd2f-4f8f-8fc9-d6ef7ef731d6}">
       <Declaration><![CDATA[METHOD Reset : BOOL
+(*
+    Purpose:
+        Request an abort of a calibration move that is in progress, as part of a
+        stage-level reset.
+
+    Usage:
+        Called from the caller's reset handling, once per reset request. The call
+        sets the internal bReset flag, which the state machine consumes and clears
+        on its next cycle, so one call is enough. A move that is not in progress
+        is unaffected.
+
+    Objectives:
+        - Abort the move without blocking the PLC cycle.
+        - Report the abort through bCalibrateMoveAborted so the caller can drop
+          its execute and clear the stage error from a defined state.
+
+    Returns:
+        TRUE when the request was registered. The abort is asynchronous: it does
+        not mean the move has already stopped, so wait for bCalibrateMoveAborted
+        (or for bCalibrateMoveBusy to fall).
+
+    History:
+        2025-10-28  Y. S. Mandza   Created - split out of FB_MotionStageMCS2.
+        2026-11-27  Audit fix      Header and return value documented; the return
+                                   value is now assigned.
+*)
 VAR_INPUT
 END_VAR
 ]]></Declaration>
       <Implementation>
-        <ST><![CDATA[THIS^.bReset := TRUE;]]></ST>
+        <ST><![CDATA[THIS^.bReset := TRUE;
+Reset := TRUE;]]></ST>
       </Implementation>
     </Method>
   </POU>
