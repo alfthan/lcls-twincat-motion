@@ -1,8 +1,37 @@
 ﻿<?xml version="1.0" encoding="utf-8"?>
 <TcPlcObject Version="1.1.0.1">
   <POU Name="FB_MCS2StepMode" Id="{a0cda8fc-6342-4ae1-b3b5-7e5da20f78df}" SpecialFunc="None">
-    <Declaration><![CDATA[FUNCTION_BLOCK FB_MCS2StepMode
+    <Declaration><![CDATA[(*
+    FB_MCS2StepMode
+    Purpose:
+        Execute one open-loop step move on an MCS2 / E-727 channel that is
+        running in DS402 step mode (control-word bit 3 = enable operation,
+        bit 4 = step trigger).
+    Usage:
+        Call every cycle from the DS402 sequencer (FB_MotionStageMCS2,
+        E_MCS2OpMode.STEP) while the request is outstanding:
+
+            fbStepMode(bExecute := <request still active>, ...)
+
+        bExecute is level-held: its rising edge starts one step, and its
+        falling edge stops the step and reports the move as aborted. A caller
+        that only pulses bExecute for a single cycle cannot complete a step.
+    Objectives:
+        - Start a step exactly once per rising edge of bExecute (IDLING).
+        - Abort the step in INIT/IN_PROGRESS as soon as bExecute drops, so the
+          step trigger bit is released instead of leaving the drive commanded.
+        - Latch bStepMoveDone / bStepMoveAborted until the next rising edge;
+          a latched fault is cleared only through Reset().
+    History:
+        2026-11-27, Scirix Agent:
+            Abort the step on the falling edge of bExecute (previously the
+            falling edge was ignored after IDLING, so dropping execute left the
+            step running) and document the level-held execute semantics.
+            Refs: audit finding 1098, task #331.
+*)
+FUNCTION_BLOCK FB_MCS2StepMode
 VAR_INPUT
+    // Level-held execute: rising edge starts the step, falling edge aborts it.
     bExecute : BOOL;
 END_VAR
 VAR_IN_OUT
@@ -44,7 +73,12 @@ CASE eStepState OF
         END_IF
 
     E_MoveState.INIT:
-        IF stMotionStage.bError THEN
+        IF NOT bExecute THEN
+            // Execute released before the step was triggered: nothing to stop,
+            // just report the request as aborted.
+            bStepMoveAborted := TRUE;
+            eStepState := E_MoveState.INTERRUPTED;
+        ELSIF stMotionStage.bError THEN
             eStepState := E_MoveState.ERROR;
         ELSE
             stDS402Drive.nDriveControl.4 := TRUE;
@@ -54,6 +88,12 @@ CASE eStepState OF
 
     E_MoveState.IN_PROGRESS:
         IF bHalt OR bReset THEN
+            bStepMoveAborted := TRUE;
+            eStepState := E_MoveState.INTERRUPTED;
+        ELSIF NOT bExecute THEN
+            // Falling edge of the level-held execute: stop the step. INTERRUPTED
+            // drops the step trigger (control-word bit 4) on the next cycle and
+            // releases bStepMoveBusy, so the caller sees bStepMoveAborted.
             bStepMoveAborted := TRUE;
             eStepState := E_MoveState.INTERRUPTED;
         ELSIF stDS402Drive.stDriveStatus.Bit13_OpModeSpecific THEN
