@@ -3,6 +3,10 @@
   <POU Name="FB_WriteCalibrationParameters" Id="{6f8141b3-3a18-4ecd-8d0f-d7b01f6561a0}" SpecialFunc="None">
     <Declaration><![CDATA[// Calibration Param SDO Hybrid Logic (startup-sequential, then on-demand)
 // Sequential trigger (bCalibParamStep statemachine) is used at startup or force, otherwise parallel/on-demand.
+// Every calibration-option SDO transaction is bounded by tonSdoTimeout: a drive that never
+// answers the mailbox write must not leave this block waiting forever. On expiry the
+// request is dropped, stMotionStage.bError/nErrorId/sCustomErrorMessage are raised and the
+// sequence parks in ERROR until bErrorAcknowledge restarts it.
 
 FUNCTION_BLOCK FB_WriteCalibrationParameters
 VAR_INPUT
@@ -40,6 +44,10 @@ VAR
     nCalibParamStep : (IDLE := 0, CALIBOPTS := 1, DONE := 10, ERROR := -1) := IDLE;
     bForceSequentialSDOs : BOOL := FALSE;
     bErrorAcknowledge: BOOL;
+    // Watchdog bounding one calibration-option SDO transaction (request to completion
+    // edge). Kept here rather than on the caller so no site can configure the wait away.
+    tonSdoTimeout : TON;
+    tSdoTimeout : TIME := T#5S;
 END_VAR
 
 ]]></Declaration>
@@ -56,8 +64,10 @@ IF bEnable THEN
         PT := T#6S
     );
 
-    // Reset sequence if startup timer hasn't fired and not forcing sequential SDOs
-    IF NOT tonStartUp.Q AND nCalibParamStep <> IDLE AND NOT bForceSequentialSDOs THEN
+    // Reset sequence if startup timer hasn't fired and not forcing sequential SDOs.
+    // ERROR is excluded so a watchdog expiry stays latched until bErrorAcknowledge.
+    IF NOT tonStartUp.Q AND nCalibParamStep <> IDLE AND nCalibParamStep <> ERROR
+       AND NOT bForceSequentialSDOs THEN
         nCalibParamStep := IDLE;
     END_IF
 
@@ -69,6 +79,14 @@ IF bEnable THEN
     END_IF
 
     ftCalibrationOptSetDone(CLK := fbCalibrationOptWrite.bBusy);
+
+    // Arm the SDO watchdog for the whole transaction: from the cycle the write is
+    // requested until its completion edge. Each new request restarts it (bExecute FALSE
+    // drops IN), so a hung mailbox expires instead of stalling the block.
+    tonSdoTimeout(
+        IN := fbCalibrationOptWrite.bExecute AND NOT ftCalibrationOptSetDone.Q,
+        PT := tSdoTimeout
+    );
 
     IF tonStartUp.Q OR bForceSequentialSDOs THEN
         CASE nCalibParamStep OF
@@ -90,6 +108,15 @@ IF bEnable THEN
                             nRecentCalibrationOpt := stMCS2ChanParameter.nCalibrationOpt;
                             nCalibParamStep       := DONE;
                         END_IF
+                    ELSIF tonSdoTimeout.Q THEN
+                        // Drive never answered the mailbox write: drop the request and
+                        // raise the latched fault.
+                        fbCalibrationOptWrite.bExecute    := FALSE;
+                        stMotionStage.bError              := TRUE;
+                        stMotionStage.nErrorId            := E_LCLSMotionError.SDO_TIMEOUT;
+                        stMotionStage.sCustomErrorMessage :=
+                            'Calibration option (0x2004) SDO write timed out.';
+                        nCalibParamStep                   := ERROR;
                     END_IF
                 ELSE
                     nCalibParamStep := DONE;
@@ -106,8 +133,10 @@ IF bEnable THEN
         END_CASE
 
     ELSE
-        // Parallel SDO mode — single write
-        fbCalibrationOptWrite.bExecute := stMCS2ChanParameter.nCalibrationOpt <> nRecentCalibrationOpt;
+        // Parallel SDO mode — single write. Suppressed while a watchdog fault is
+        // latched, so a dead mailbox is not retried every scan.
+        fbCalibrationOptWrite.bExecute := (stMCS2ChanParameter.nCalibrationOpt <> nRecentCalibrationOpt)
+                                          AND nCalibParamStep <> ERROR;
         IF ftCalibrationOptSetDone.Q THEN
             fbCalibrationOptWrite.bExecute := FALSE;
             IF fbCalibrationOptWrite.bError THEN
@@ -117,6 +146,16 @@ IF bEnable THEN
                 nRecentCalibrationOpt  := stMCS2ChanParameter.nCalibrationOpt;
                 bCalibrationsParamsSet := TRUE;
             END_IF
+        ELSIF tonSdoTimeout.Q THEN
+            // Drive never answered the mailbox write: drop the request and raise the
+            // latched fault.
+            fbCalibrationOptWrite.bExecute    := FALSE;
+            stMotionStage.bError              := TRUE;
+            stMotionStage.nErrorId            := E_LCLSMotionError.SDO_TIMEOUT;
+            stMotionStage.sCustomErrorMessage :=
+                'Calibration option (0x2004) SDO write timed out.';
+            nCalibParamStep                   := ERROR;
+            bCalibrationsParamsSet            := FALSE;
         END_IF
     END_IF
 
