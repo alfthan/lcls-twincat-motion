@@ -1,74 +1,151 @@
 ﻿<?xml version="1.0" encoding="utf-8"?>
 <TcPlcObject Version="1.1.0.1">
   <POU Name="FB_WriteStepModeParameters" Id="{309453e5-6198-4e60-a7a5-fef2f5a9da17}" SpecialFunc="None">
-    <Declaration><![CDATA[// Sequential SDOs at startup or when forced; parallel writes otherwise (mirrors Homing Params block).
+    <Declaration><![CDATA[(*
+    Purpose:
+        Write the three open-loop (step-mode) parameters of one MCS2 DS402
+        channel over CoE - step count, step amplitude and step frequency - so an
+        open-loop jog uses the counts, amplitude and frequency requested through
+        the STEP_COUNT, STEP_VOLTAGE and STEP_FREQ PVs.
+    Usage:
+        Instantiate one block per MCS2 channel beside the sibling parameter
+        writers and call it every cycle with bEnable TRUE. Wire stDS402Drive,
+        stMotionStage and stMCS2ChanParameter to the owning stage's own
+        structures; the block returns immediately while any of the three
+        references is invalid. ScaleStepModeParams() re-clamps the requested
+        values every cycle, and a parameter is written only when its scaled
+        value differs from the last one written. Within the first 5 s of enable
+        (tonStartUp.Q still FALSE) the three writes run in parallel; once
+        tonStartUp.Q is TRUE - still enabled but the step-mode parameters are
+        not confirmed yet - or while bForceSequentialSDOs is held TRUE, the
+        sequential nJogParamStep state machine writes one SDO at a time instead.
+        Drive an error reset through bErrorAcknowledge to restart the sequence.
+        Not instantiated in this library today: FB_WriteChanParameters owns the
+        step-mode SDO writes for the stage (fbSetSteps/fbSetStepAmp/
+        fbSetStepFreq); this block is kept as the single-purpose step-mode
+        writer.
+    Objectives:
+        - Hold at most one CoE SDO write in flight while the sequential path is
+          active, and drive it from a named, non-blocking
+          IDLE/STEPS/AMP/FREQ/DONE/ERROR state machine.
+        - Write only the parameters whose scaled value changed (nRecentSteps,
+          nRecentStepAmp, nRecentStepFreq), so a steady setpoint does not hammer
+          the CoE mailbox.
+        - Clamp every requested step-mode parameter to the range the drive
+          accepts in ScaleStepModeParams() before it reaches hardware.
+        - Report an SDO failure on stMotionStage.bError/nErrorId and hold the
+          sequential path in ERROR until bErrorAcknowledge, so a failed write
+          stays visible instead of being retried silently on the next scan.
+        - Set bStepModeParamsSet only while no write is in flight, so callers
+          can treat it as "step-mode parameters applied".
+    History:
+        2025-10-28  Yann Stephen Mandza  Created, split out of the DS402/MCS2
+                                         channel-state refactor.
+        2026-05-19  ysmandza            Parameter writers consolidated behind
+                                        FB_WriteChanParameters, which now owns
+                                        the step-mode SDO writes.
+        2026-11-27  Scirix Agent        POU header, per-declaration comments and
+                                        ScaleStepModeParams() header added.
+*)
 FUNCTION_BLOCK FB_WriteStepModeParameters
 VAR_INPUT
+    // TRUE enables the block; FALSE suspends it and leaves the drive untouched.
     bEnable : BOOL;
 END_VAR
 VAR_IN_OUT
+    // Drive process data; nSlaveAddr selects the EtherCAT slave whose step-mode objects are written.
     stDS402Drive         : ST_DS402Drive;
+    // Owning stage interface: supplies the master AMS Net ID and receives the raised fault.
     stMotionStage        : ST_MotionStage;
+    // Channel parameters: holds the requested step count/amplitude/frequency and their SDO indices.
     stMCS2ChanParameter	: ST_MCS2ChanParameter;
 END_VAR
 
 VAR_OUTPUT
+   // TRUE once every changed step-mode parameter is known to be on the drive; FALSE while a write is in flight or after a fault.
    bStepModeParamsSet : BOOL;
 END_VAR
 VAR
     //  Measurements & scaled values
+    // Unused: this block writes no fast-fault window.
     {attribute 'hide'}
     nScaledFErrWin          : DINT;
+    // Scaled step count written to the drive: requested step count clamped to -1000..1000 steps.
     {attribute 'hide'}
     nScalededSteps          : DINT;
+    // Unused: step count held as an LREAL; leftover of the per-parameter writer split.
     {attribute 'hide'}
     fScalededSteps          : LREAL;
+    // Unused: this block reads no measured velocity.
     {attribute 'hide'}
     fMeasuredVelo           : LREAL;
+    // Unused: this block reads no measured acceleration.
     {attribute 'hide'}
     fMeasuredAcc            : LREAL;
+    // Unused: generic parameter scratch value, not used by this block.
     {attribute 'hide'}
     fParameterValue         : LREAL;
+    // Unused: this block reads no measured position.
     {attribute 'hide'}
     fMeasuredPos             : LREAL;
     //  Internal numeric parameters
+    // Scaled step amplitude written to the drive: 50..100 % of full step voltage scaled x655.35 to 16-bit drive units (32768..65535).
     {attribute 'hide'}
     nScalededStepAmp         : UINT;
+    // Scaled step frequency written to the drive: 500..1000 Hz as a 16-bit drive unit.
     {attribute 'hide'}
     nScaledStepFreq          : UINT;
     // Open Loop Operations
+    // CoE SDO writer for the step count (stMCS2ChanParameter.nChanStepIdx, subindex 0).
     {attribute 'hide'}
     fbSetSteps          : FB_EcCoESdoWrite;
+    // CoE SDO writer for the step frequency (stMCS2ChanParameter.nChanStepFreqIdx, subindex 0).
     {attribute 'hide'}
     fbSetStepFreq       : FB_EcCoESdoWrite;
+    // CoE SDO writer for the step amplitude (stMCS2ChanParameter.nChanStepAmpIdx, subindex 0).
     {attribute 'hide'}
     fbSetStepAmp        : FB_EcCoESdoWrite;
+    // Last step count written successfully; a mismatch requests a new write.
     {attribute 'hide'}
     nRecentSteps        : DINT;
+    // Last step amplitude written successfully; a mismatch requests a new write.
     {attribute 'hide'}
     nRecentStepAmp      : UINT;
+    // Last step frequency written successfully; a mismatch requests a new write.
     {attribute 'hide'}
     nRecentStepFreq     : UINT;
+    // Falling edge of fbSetStepAmp.bBusy: the in-flight amplitude write finished.
     {attribute 'hide'}
     ftStepAmpUpdateDone : F_TRIG;
+    // Falling edge of fbSetStepFreq.bBusy: the in-flight frequency write finished.
     {attribute 'hide'}
     ftStepFreqUpdateDone    : F_TRIG;
+    // Falling edge of fbSetSteps.bBusy: the in-flight step-count write finished.
     {attribute 'hide'}
     ftStepUpdateDone    : F_TRIG;
+    // Startup window timer (PT = T#5S below): its Q selects the sequential SDO path.
     tonStartUp : TON;
+    // Sequential SDO sequencer state; IDLE whenever the parallel path runs, ERROR -1 after an SDO fault.
     nJogParamStep : (IDLE := 0, STEPS := 1, AMP := 2, FREQ := 3, DONE := 10, ERROR := -1) := IDLE;
+    // Debug: force the sequential path at any time, even inside the startup window.
     bForceSequentialSDOs : BOOL := FALSE;
+    // Rising edge clears the latched ERROR state and the stMotionStage fault, restarting the sequence.
     bErrorAcknowledge: BOOL;
 END_VAR
 ]]></Declaration>
     <Implementation>
-      <ST><![CDATA[IF NOT __ISVALIDREF(stDS402Drive)
+      <ST><![CDATA[// All three structures are wired by the owning stage FB; without them there is
+// nothing to write and nowhere to report a fault.
+IF NOT __ISVALIDREF(stDS402Drive)
     OR NOT __ISVALIDREF(stMotionStage)
     OR NOT __ISVALIDREF(stMCS2ChanParameter) THEN
     RETURN;
 END_IF
 
+// Disabled: no SDO write is commanded and no fault is raised; the drive is left alone.
 IF bEnable THEN
+    // Startup window: runs while enabled until the parameters are confirmed, so Q
+    // opens the sequential path 5 s after enable if a write is still outstanding.
     tonStartUp(
         IN := bEnable AND NOT bStepModeParamsSet,
         PT := T#5S
@@ -86,6 +163,7 @@ IF bEnable THEN
         stMotionStage.nErrorId := 0;
     END_IF
 
+    // Re-clamp the requested step-mode values every cycle before any write is requested.
     ScaleStepModeParams();
 
     ftStepUpdateDone    (CLK := fbSetSteps.bBusy);
@@ -93,7 +171,9 @@ IF bEnable THEN
     ftStepFreqUpdateDone(CLK := fbSetStepFreq.bBusy);
 
     IF tonStartUp.Q OR bForceSequentialSDOs THEN
+        // Sequential path: at most one CoE SDO write in flight.
         CASE nJogParamStep OF
+            // Idle: drop any leftover execute and start the sweep at STEPS.
             IDLE:
                 bStepModeParamsSet      := FALSE;
                 fbSetSteps.bExecute     := FALSE;
@@ -101,6 +181,7 @@ IF bEnable THEN
                 fbSetStepFreq.bExecute  := FALSE;
                 nJogParamStep           := STEPS;
 
+            // Step count first; advance on the falling edge of the write's busy flag.
             STEPS:
                 IF nScalededSteps <> nRecentSteps THEN
                     fbSetSteps.bExecute := TRUE;
@@ -119,6 +200,7 @@ IF bEnable THEN
                     nJogParamStep := AMP;
                 END_IF
 
+            // Step amplitude, written only when its scaled value changed.
             AMP:
                 IF nScalededStepAmp <> nRecentStepAmp THEN
                     fbSetStepAmp.bExecute := TRUE;
@@ -137,6 +219,7 @@ IF bEnable THEN
                     nJogParamStep := FREQ;
                 END_IF
 
+            // Step frequency, the last parameter of the sweep.
             FREQ:
                 IF nScaledStepFreq <> nRecentStepFreq THEN
                     fbSetStepFreq.bExecute := TRUE;
@@ -155,22 +238,28 @@ IF bEnable THEN
                     nJogParamStep := DONE;
                 END_IF
 
+            // Sweep finished: report the parameters as applied and stay here.
             DONE:
                 bStepModeParamsSet := TRUE;
 
+            // Latched SDO fault: cleared only by bErrorAcknowledge above.
             ERROR:
                 bStepModeParamsSet := FALSE;
 
+            // Undefined state (e.g. after an online change): restart the sweep.
             ELSE
                 nJogParamStep := IDLE;
         END_CASE
 
     ELSE
-        // Parallel SDO mode — fire all three simultaneously
+        // Parallel path (startup window still open and not forced): fire all three
+        // writes at once, each only when its scaled value changed.
         fbSetSteps.bExecute    := nScalededSteps   <> nRecentSteps;
         fbSetStepAmp.bExecute  := nScalededStepAmp <> nRecentStepAmp;
         fbSetStepFreq.bExecute := nScaledStepFreq  <> nRecentStepFreq;
 
+        // Any writer finishing: latch the first fault found, otherwise record the
+        // values as written and report the parameters as applied.
         IF ftStepUpdateDone.Q OR ftStepAmpUpdateDone.Q OR ftStepFreqUpdateDone.Q THEN
             IF fbSetSteps.bError THEN
                 stMotionStage.bError   := fbSetSteps.bError;
@@ -218,13 +307,35 @@ IF bEnable THEN
         cbBufLen   := SIZEOF(stMCS2ChanParameter.nChanStepFreq)
     );
 
+    // Applied flag drops while any write is still in flight.
     bStepModeParamsSet R= fbSetSteps.bBusy
                        OR fbSetStepAmp.bBusy
                        OR fbSetStepFreq.bBusy;
 END_IF]]></ST>
     </Implementation>
     <Method Name="ScaleStepModeParams" Id="{78ce5a79-ef3b-44af-a794-7ac04154475b}">
-      <Declaration><![CDATA[(*Scaled Open Loop Step mode motion parameters*)
+      <Declaration><![CDATA[(*
+    Purpose:
+        Convert the requested step-mode channel parameters into the values the
+        MCS2 drive field expects, clamping each to the range the drive accepts.
+    Usage:
+        Called every cycle from the implementation while bEnable is TRUE, before
+        the SDO writers run. Reads stMCS2ChanParameter.nChanStep,
+        nChanStepAmp and nChanStepFreq and updates nScalededSteps,
+        nScalededStepAmp and nScaledStepFreq.
+    Objectives:
+        - Clamp the requested step count to -1000..1000 steps (negative = reverse
+          direction).
+        - Clamp the step amplitude to 50..100 % of full step voltage (the
+          STEP_VOLTAGE PV) and scale it to the drive's 16-bit field (x655.35,
+          i.e. 32768..65535 counts).
+        - Clamp the step frequency to 500..1000 Hz.
+    History:
+        2025-10-28  Yann Stephen Mandza  Created with the DS402/MCS2 channel
+                                         parameter split.
+        2026-11-27  Scirix Agent        Method header added; clamp ranges and
+                                        units documented.
+*)
 METHOD ScaleStepModeParams
 VAR_INPUT
 END_VAR
