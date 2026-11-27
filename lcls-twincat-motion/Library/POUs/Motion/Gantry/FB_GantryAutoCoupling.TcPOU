@@ -1,31 +1,102 @@
 ﻿<?xml version="1.0" encoding="utf-8"?>
 <TcPlcObject Version="1.1.0.1">
   <POU Name="FB_GantryAutoCoupling" Id="{532dfcaf-6187-4140-aaad-e20a9bbe6b43}" SpecialFunc="None">
-    <Declaration><![CDATA[FUNCTION_BLOCK FB_GantryAutoCoupling
+    <Declaration><![CDATA[(*
+FB_GantryAutoCoupling
+A. Wallace 2017-02-15
+
+Purpose:
+    Keep a master/slave gantry axis pair geared together in the NC and provide
+    the gantry difference virtual limit switch for both axes.
+
+Usage:
+    Call once per cycle, before the FB_MotionStage calls of the gantry axes.
+    Pulse bExecuteCouple to gear the slave to the master and pulse
+    bExecuteDecouple to remove the gearing. A command starts on the rising edge
+    of its execute input and runs to completion without blocking the PLC;
+    dropping the input never starts or aborts one.
+    bDoneCouple/bDoneDecouple latch when their command completed and bError
+    latches when a command failed or was rejected. All of them are cleared only
+    by the rising edge of bReset, so the caller owns the acknowledge. While an
+    error is latched no new command is accepted.
+    Nothing is coupled at first scan: the caller commands every couple or
+    decouple itself.
+
+Objectives:
+    Execute coupling and decoupling only on the caller's rising edge.
+    Hold Done and Error until the caller acknowledges them with bReset.
+    Run at most one of coupling/decoupling at a time and reject the other.
+
+History:
+    A. Wallace 2017-02-15 - Initial version: auto-coupled at first scan.
+    2026-11-27 - Replace the S/R auto logic with edge-triggered execute inputs
+                 and latched Done/Error that require bReset.
+*)
+FUNCTION_BLOCK FB_GantryAutoCoupling
 VAR_INPUT
+    // Gantry difference tolerance in encoder counts
     nGantryTol : LINT;
+    // Couple command: starts on the rising edge, one command per edge
+    bExecuteCouple : BOOL;
+    // Decouple command: starts on the rising edge, one command per edge
+    bExecuteDecouple : BOOL;
+    // Acknowledge: the rising edge clears the latched Done/Error flags
+    bReset : BOOL;
 END_VAR
 VAR_OUTPUT
+    // TRUE if the NC reports the master/slave pair as geared together
     bGantryAlreadyCoupled : BOOL;
+    // TRUE while a couple or decouple command is executing
+    bBusy : BOOL;
+    // Latched: the last coupling command completed, cleared by bReset
+    bDoneCouple : BOOL;
+    // Latched: the last decoupling command completed, cleared by bReset
+    bDoneDecouple : BOOL;
+    // Latched: the last command failed or was rejected, cleared by bReset
+    bError : BOOL;
+    // Error code of the latched error, see E_LCLSMotionError and the NC codes
+    nErrorId : UDINT;
+    // Description of nErrorId
+    sErrorMessage : STRING;
 END_VAR
 VAR_IN_OUT
     Master : ST_MotionStage;
     MasterEnc : ST_RenishawAbsEnc;
     Slave : ST_MotionStage;
     SlaveEnc : ST_RenishawAbsEnc;
-    bExecuteCouple : BOOL;
-    bExecuteDecouple : BOOL;
 END_VAR
 VAR
     gantry_diff_limit : FB_GantryDiffVirtualLimitSwitch;
     couple : MC_GEARIN;
     decouple : MC_GEAROUT;
-    bInitComplete : BOOL;
     fbSetEnables : FB_SetEnables;
+    rtCouple : R_TRIG;   // Rising edge of the caller's couple command
+    rtDecouple : R_TRIG; // Rising edge of the caller's decouple command
+    rtReset : R_TRIG;    // Rising edge of the caller's acknowledge
+    bCoupleCmd : BOOL;   // Execute input of MC_GEARIN, owned by this FB
+    bDecoupleCmd : BOOL; // Execute input of MC_GEAROUT, owned by this FB
+    nState : UINT;       // Coupling state machine state
+END_VAR
+// Coupling state machine states
+VAR CONSTANT
+    INIT : UINT := 0;
+    WAIT_EXEC : UINT := 1;
+    GEARING_IN : UINT := 2;
+    GEARING_OUT : UINT := 3;
+    ERROR : UINT := 4;
 END_VAR
 ]]></Declaration>
     <Implementation>
-      <ST><![CDATA[// Designate Master and SLave Axes
+      <ST><![CDATA[(*
+Gantry coupling state machine
+
+Coupling and decoupling are caller commands: each starts on the rising edge of
+its execute input, runs to completion in the state machine below and never
+blocks the PLC. Done and Error are latched and cleared only by the rising edge
+of bReset. A latched error blocks new commands until it is acknowledged.
+*)
+
+// Designate Master and Slave Axes
 Master.bGantryAxis := TRUE;
 Slave.bGantryAxis := TRUE;
 
@@ -51,19 +122,102 @@ IF bGantryAlreadyCoupled THEN
     Slave.bGantryBackwardEnable := Master.bAllBackwardEnable AND Slave.bGantryBackwardEnable;
 END_IF
 
+// Command edges: a command only ever starts on the caller's rising edge
+rtCouple(CLK:=bExecuteCouple);
+rtDecouple(CLK:=bExecuteDecouple);
+rtReset(CLK:=bReset);
 
-// Coupling states
-// Auto-coupling at init and auto-reset of coupling boolean
-bExecuteCouple S= NOT bInitComplete;
+// Acknowledge: clear the latched results and leave the error state
+IF rtReset.Q THEN
+    bDoneCouple := FALSE;
+    bDoneDecouple := FALSE;
+    bError := FALSE;
+    nErrorId := 0;
+    IF nState = ERROR THEN
+        nState := WAIT_EXEC;
+    END_IF
+END_IF
 
-bExecuteCouple R= couple.Busy OR bGantryAlreadyCoupled;
-couple(Master:=Master.Axis, Slave:=Slave.Axis, Execute:=bExecuteCouple);
+CASE nState OF
+    // First scan: start from a known state
+    INIT:
+        bBusy := FALSE;
+        bCoupleCmd := FALSE;
+        bDecoupleCmd := FALSE;
+        nState := WAIT_EXEC;
+    // Waiting for a caller command
+    WAIT_EXEC:
+        bBusy := FALSE;
+        bCoupleCmd := FALSE;
+        bDecoupleCmd := FALSE;
+        IF rtCouple.Q THEN
+            // A new command supersedes the previous done bit
+            bDoneCouple := FALSE;
+            IF bGantryAlreadyCoupled THEN
+                // Rejected: the axes are already geared together
+                bError := TRUE;
+                nErrorId := E_LCLSMotionError.INVALID;
+                nState := ERROR;
+            ELSE
+                nState := GEARING_IN;
+            END_IF
+        ELSIF rtDecouple.Q THEN
+            bDoneDecouple := FALSE;
+            IF NOT bGantryAlreadyCoupled THEN
+                // Rejected: there is no gearing to remove
+                bError := TRUE;
+                nErrorId := E_LCLSMotionError.INVALID;
+                nState := ERROR;
+            ELSE
+                nState := GEARING_OUT;
+            END_IF
+        END_IF
+    // Gear the slave to the master
+    GEARING_IN:
+        bBusy := TRUE;
+        bCoupleCmd := TRUE;
+        IF couple.InGear THEN
+            bDoneCouple := TRUE;
+            nState := WAIT_EXEC;
+        ELSIF couple.Error THEN
+            bError := TRUE;
+            nErrorId := couple.ErrorID;
+            nState := ERROR;
+        ELSIF couple.CommandAborted THEN
+            bError := TRUE;
+            nErrorId := E_LCLSMotionError.ABORTED;
+            nState := ERROR;
+        END_IF
+    // Remove the gearing
+    GEARING_OUT:
+        bBusy := TRUE;
+        bDecoupleCmd := TRUE;
+        IF decouple.Done THEN
+            bDoneDecouple := TRUE;
+            nState := WAIT_EXEC;
+        ELSIF decouple.Error THEN
+            bError := TRUE;
+            nErrorId := decouple.ErrorID;
+            nState := ERROR;
+        ELSIF decouple.CommandAborted THEN
+            bError := TRUE;
+            nErrorId := E_LCLSMotionError.ABORTED;
+            nState := ERROR;
+        END_IF
+    // Latched error: wait here until the caller acknowledges with bReset
+    ERROR:
+        bBusy := FALSE;
+        bCoupleCmd := FALSE;
+        bDecoupleCmd := FALSE;
+END_CASE
 
-bInitComplete S= bGantryAlreadyCoupled;
+// Run the NC coupling commands with the execute inputs owned by this FB
+couple(Master:=Master.Axis, Slave:=Slave.Axis, Execute:=bCoupleCmd);
+decouple(Slave:=Slave.Axis, Execute:=bDecoupleCmd);
 
-// Decoupling with auto-reset of coupling boolean
-bExecuteDecouple R= decouple.Busy OR NOT bGantryAlreadyCoupled;
-decouple(Slave:=Slave.Axis, Execute:=bExecuteDecouple);]]></ST>
+// Describe the latched error code
+sErrorMessage := F_MotionErrorCodeLookup(nErrorId := nErrorId);
+]]></ST>
     </Implementation>
   </POU>
 </TcPlcObject>
