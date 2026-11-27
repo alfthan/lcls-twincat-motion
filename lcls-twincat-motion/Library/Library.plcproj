@@ -197,6 +197,9 @@
     <Compile Include="DUTs\E_EpicsMotorCmd.TcDUT">
       <SubType>Code</SubType>
     </Compile>
+    <Compile Include="DUTs\E_GantryCouplingState.TcDUT">
+      <SubType>Code</SubType>
+    </Compile>
     <Compile Include="DUTs\E_MotionRequest.TcDUT">
       <SubType>Code</SubType>
     </Compile>

@@ -1,31 +1,113 @@
 ﻿<?xml version="1.0" encoding="utf-8"?>
 <TcPlcObject Version="1.1.0.1">
   <POU Name="FB_GantryAutoCoupling" Id="{532dfcaf-6187-4140-aaad-e20a9bbe6b43}" SpecialFunc="None">
-    <Declaration><![CDATA[FUNCTION_BLOCK FB_GantryAutoCoupling
+    <Declaration><![CDATA[(*
+    FB_GantryAutoCoupling - couples and decouples a gantry master/slave axis pair
+
+    Purpose:
+        Keeps a gantry master/slave axis pair geared together (MC_GearIn) while it is
+        in use, releases the coupling on request (MC_GearOut) and maintains the
+        differential limit switch and the cross-axis enable interlocks of the pair.
+
+    Usage:
+        Call once per PLC cycle, after Master and Slave have been serviced by
+        FB_MotionStage, and wire Master, Slave and their absolute encoders. On the
+        first scans the block couples the axes automatically, as soon as both axes
+        are enabled by the NC. Pulse bExecuteCouple or bExecuteDecouple to change the
+        coupling state later, and pulse bReset to clear a latched fault.
+
+        The sequence is non-blocking. eState and nStep are published so the sequence
+        can be observed from a test, a scope or EPICS. A coupling or decoupling that
+        errors or exceeds its timeout latches bError with a message in sErrorMessage
+        and leaves the sequence in FAULT until bReset.
+
+    Objectives:
+        * One explicit, observable sequence instead of latched booleans: the named
+          states of E_GantryCouplingState and the nStep counter tell every consumer
+          where the coupling sequence is.
+        * No blocking wait: each cycle performs at most one action, and every wait
+          for the NC is bounded by a timeout that raises a latched fault.
+        * Commands are edge triggered, so dropping bExecuteCouple/bExecuteDecouple
+          neither cancels nor repeats a coupling, and a fault survives a drop.
+
+    State machine (one action per step, one transition per cycle):
+        IDLE       step 0   both NC commands idle
+                             NOT bInitComplete and both axes enabled -> COUPLING
+                             bExecuteCouple rising edge               -> COUPLING
+                             bExecuteDecouple rising edge             -> DECOUPLING
+        COUPLING   step 10  raise the MC_GearIn Execute line
+                   step 11  wait for the NC coupling state, bounded by tCouplingTimeout
+                             bGantryAlreadyCoupled      -> COUPLED
+                             couple.Error or timeout    -> FAULT
+        COUPLED    step 20  both NC commands idle, the gearing is held by the NC
+                             bExecuteDecouple rising edge -> DECOUPLING
+                             coupling released elsewhere  -> IDLE
+        DECOUPLING step 30  raise the MC_GearOut Execute line
+                   step 31  wait for the released state, bounded by tDecouplingTimeout
+                             NOT bGantryAlreadyCoupled    -> IDLE
+                             decouple.Error or timeout    -> FAULT
+        FAULT      step 90  both NC commands idle, bError latched
+                             bReset rising edge -> COUPLED if still coupled, else IDLE
+
+    History:
+        2026-11-27 - Replaced the bInitComplete/bExecuteCouple/bExecuteDecouple
+                     latches with the explicit state machine above (audit finding
+                     #1105). Command booleans are now edge triggered inputs, and the
+                     waits for the NC are bounded by timeouts that raise a fault.
+*)
+FUNCTION_BLOCK FB_GantryAutoCoupling
 VAR_INPUT
-    nGantryTol : LINT;
+    nGantryTol : LINT;  // Maximum allowed master/slave position difference [encoder counts]
+    bExecuteCouple : BOOL;  // Rising edge gears the axes together, ignored while already coupled
+    bExecuteDecouple : BOOL;  // Rising edge releases the coupling
+    bReset : BOOL;  // Rising edge clears a latched fault
+    tCouplingTimeout : TIME := T#10S;  // Maximum time allowed for MC_GearIn to establish the coupling
+    tDecouplingTimeout : TIME := T#10S;  // Maximum time allowed for MC_GearOut to release the coupling
 END_VAR
 VAR_OUTPUT
-    bGantryAlreadyCoupled : BOOL;
+    bGantryAlreadyCoupled : BOOL;  // TRUE while the NC reports both axes in the geared state
+    bBusy : BOOL;  // TRUE while a coupling or decoupling command is outstanding
+    bError : BOOL;  // Latched fault, cleared only by a rising edge on bReset
+    sErrorMessage : STRING;  // Description of the latched fault
+    eState : E_GantryCouplingState;  // Current state of the coupling sequence
+    nStep : UINT;  // Current step of the coupling sequence, see the state table above
 END_VAR
 VAR_IN_OUT
-    Master : ST_MotionStage;
-    MasterEnc : ST_RenishawAbsEnc;
-    Slave : ST_MotionStage;
-    SlaveEnc : ST_RenishawAbsEnc;
-    bExecuteCouple : BOOL;
-    bExecuteDecouple : BOOL;
+    Master : ST_MotionStage;  // Gantry master axis
+    MasterEnc : ST_RenishawAbsEnc;  // Master absolute encoder, used for the differential limit switch
+    Slave : ST_MotionStage;  // Gantry slave axis
+    SlaveEnc : ST_RenishawAbsEnc;  // Slave absolute encoder, used for the differential limit switch
 END_VAR
 VAR
-    gantry_diff_limit : FB_GantryDiffVirtualLimitSwitch;
-    couple : MC_GEARIN;
-    decouple : MC_GEAROUT;
-    bInitComplete : BOOL;
-    fbSetEnables : FB_SetEnables;
+    gantry_diff_limit : FB_GantryDiffVirtualLimitSwitch;  // Differential limit switch on the master/slave encoder difference
+    couple : MC_GEARIN;  // NC gear-in (couple) command
+    decouple : MC_GEAROUT;  // NC gear-out (decouple) command
+    fbSetEnables : FB_SetEnables;  // Recompute the bAll*Enable summary of a stage from its individual enables
+    bInitComplete : BOOL;  // TRUE once the axes have been geared, so the automatic coupling is not repeated
+    bAxesEnabled : BOOL;  // TRUE when both stages report that the NC has the axis enabled
+    bGearInExecute : BOOL;  // Execute line of MC_GEARIN, owned by the state machine
+    bGearOutExecute : BOOL;  // Execute line of MC_GEAROUT, owned by the state machine
+    rtCouple : R_TRIG;  // Rising edge of bExecuteCouple
+    rtDecouple : R_TRIG;  // Rising edge of bExecuteDecouple
+    rtReset : R_TRIG;  // Rising edge of bReset
+    tonCoupleTimeout : TON;  // Bounds the COUPLING wait step
+    tonDecoupleTimeout : TON;  // Bounds the DECOUPLING wait step
+    fbLogger : FB_LogMessage := (eSubsystem := E_SubSystem.MOTION);  // Shared event logger
+    ePrevState : E_GantryCouplingState;  // State of the previous cycle, used to log transitions only
 END_VAR
 ]]></Declaration>
     <Implementation>
-      <ST><![CDATA[// Designate Master and SLave Axes
+      <ST><![CDATA[// Guard the in-out references before dereferencing them
+IF NOT __ISVALIDREF(Master)
+    OR NOT __ISVALIDREF(MasterEnc)
+    OR NOT __ISVALIDREF(Slave)
+    OR NOT __ISVALIDREF(SlaveEnc) THEN
+    bGantryAlreadyCoupled := FALSE;
+    bBusy := FALSE;
+    RETURN;
+END_IF
+
+// Designate Master and Slave Axes
 Master.bGantryAxis := TRUE;
 Slave.bGantryAxis := TRUE;
 
@@ -49,21 +131,170 @@ IF bGantryAlreadyCoupled THEN
 
     Master.bGantryBackwardEnable := Master.bGantryBackwardEnable AND Slave.bAllBackwardEnable;
     Slave.bGantryBackwardEnable := Master.bAllBackwardEnable AND Slave.bGantryBackwardEnable;
+
+    // The axes are geared: never repeat the automatic coupling, even if the coupling
+    // is later released from outside this block
+    bInitComplete := TRUE;
 END_IF
 
+// Commands execute once per rising edge, as on a standard PLCopen function block
+rtCouple(CLK := bExecuteCouple);
+rtDecouple(CLK := bExecuteDecouple);
+rtReset(CLK := bReset);
 
-// Coupling states
-// Auto-coupling at init and auto-reset of coupling boolean
-bExecuteCouple S= NOT bInitComplete;
+// Each timeout is armed by the wait step of its own state only, so it always starts
+// fresh with the sequence
+tonCoupleTimeout(IN := (eState = E_GantryCouplingState.COUPLING) AND (nStep = 11), PT := tCouplingTimeout);
+tonDecoupleTimeout(IN := (eState = E_GantryCouplingState.DECOUPLING) AND (nStep = 31), PT := tDecouplingTimeout);
 
-bExecuteCouple R= couple.Busy OR bGantryAlreadyCoupled;
-couple(Master:=Master.Axis, Slave:=Slave.Axis, Execute:=bExecuteCouple);
+// MC_GearIn only succeeds on enabled axes: the automatic coupling waits for them
+bAxesEnabled := Master.bEnableDone AND Slave.bEnableDone;
 
-bInitComplete S= bGantryAlreadyCoupled;
+// A latched fault is cleared by an explicit reset only
+IF rtReset.Q THEN
+    bError := FALSE;
+    sErrorMessage := '';
+END_IF
 
-// Decoupling with auto-reset of coupling boolean
-bExecuteDecouple R= decouple.Busy OR NOT bGantryAlreadyCoupled;
-decouple(Slave:=Slave.Axis, Execute:=bExecuteDecouple);]]></ST>
+// Coupling sequence: one action per step, no blocking waits
+CASE eState OF
+    E_GantryCouplingState.IDLE:
+        // Not coupled and no command in progress
+        nStep := 0;
+        bGearInExecute := FALSE;
+        bGearOutExecute := FALSE;
+
+        IF NOT bInitComplete AND bAxesEnabled THEN
+            // Automatic coupling after startup, once both axes are enabled
+            eState := E_GantryCouplingState.COUPLING;
+            nStep := 10;
+        ELSIF rtCouple.Q AND NOT bGantryAlreadyCoupled THEN
+            eState := E_GantryCouplingState.COUPLING;
+            nStep := 10;
+        ELSIF rtDecouple.Q AND bGantryAlreadyCoupled THEN
+            eState := E_GantryCouplingState.DECOUPLING;
+            nStep := 30;
+        END_IF
+
+    E_GantryCouplingState.COUPLING:
+        CASE nStep OF
+            10:
+                // Step 10: start the gearing with a rising edge on MC_GearIn
+                bGearOutExecute := FALSE;
+                bGearInExecute := TRUE;
+                nStep := 11;
+            11:
+                // Step 11: wait for the NC to report the geared state
+                IF bGantryAlreadyCoupled THEN
+                    bGearInExecute := FALSE;
+                    eState := E_GantryCouplingState.COUPLED;
+                    nStep := 20;
+                ELSIF couple.Error OR tonCoupleTimeout.Q THEN
+                    bGearInExecute := FALSE;
+                    bError := TRUE;
+                    IF tonCoupleTimeout.Q THEN
+                        sErrorMessage := 'Gantry coupling timeout';
+                    ELSE
+                        sErrorMessage := 'Gantry coupling failed';
+                    END_IF
+                    eState := E_GantryCouplingState.FAULT;
+                    nStep := 90;
+                END_IF
+            ELSE
+                // Unexpected step value: restart the sequence
+                nStep := 10;
+        END_CASE
+
+    E_GantryCouplingState.COUPLED:
+        // Geared together: the NC holds the coupling, both commands stay idle
+        nStep := 20;
+        bGearInExecute := FALSE;
+        bGearOutExecute := FALSE;
+
+        IF rtDecouple.Q THEN
+            eState := E_GantryCouplingState.DECOUPLING;
+            nStep := 30;
+        ELSIF NOT bGantryAlreadyCoupled THEN
+            // The coupling was released from outside this block: report it and stay
+            // decoupled instead of fighting the operator
+            eState := E_GantryCouplingState.IDLE;
+            nStep := 0;
+        END_IF
+
+    E_GantryCouplingState.DECOUPLING:
+        CASE nStep OF
+            30:
+                // Step 30: start the release with a rising edge on MC_GearOut
+                bGearInExecute := FALSE;
+                bGearOutExecute := TRUE;
+                nStep := 31;
+            31:
+                // Step 31: wait for the NC to report the released state
+                IF NOT bGantryAlreadyCoupled THEN
+                    bGearOutExecute := FALSE;
+                    eState := E_GantryCouplingState.IDLE;
+                    nStep := 0;
+                ELSIF decouple.Error OR tonDecoupleTimeout.Q THEN
+                    bGearOutExecute := FALSE;
+                    bError := TRUE;
+                    IF tonDecoupleTimeout.Q THEN
+                        sErrorMessage := 'Gantry decoupling timeout';
+                    ELSE
+                        sErrorMessage := 'Gantry decoupling failed';
+                    END_IF
+                    eState := E_GantryCouplingState.FAULT;
+                    nStep := 90;
+                END_IF
+            ELSE
+                // Unexpected step value: restart the sequence
+                nStep := 30;
+        END_CASE
+
+    E_GantryCouplingState.FAULT:
+        // Latched fault: both NC commands idle until the fault is acknowledged
+        nStep := 90;
+        bGearInExecute := FALSE;
+        bGearOutExecute := FALSE;
+
+        IF rtReset.Q THEN
+            IF bGantryAlreadyCoupled THEN
+                eState := E_GantryCouplingState.COUPLED;
+                nStep := 20;
+            ELSE
+                eState := E_GantryCouplingState.IDLE;
+                nStep := 0;
+            END_IF
+        END_IF
+
+    ELSE
+        // Unknown state, e.g. after an online change: restart from a known state
+        eState := E_GantryCouplingState.IDLE;
+        nStep := 0;
+END_CASE
+
+// Drive the NC commands every cycle, the state machine owns their Execute lines
+couple(Master:=Master.Axis, Slave:=Slave.Axis, Execute:=bGearInExecute);
+decouple(Slave:=Slave.Axis, Execute:=bGearOutExecute);
+
+// Busy while a coupling command is outstanding
+bBusy := (eState = E_GantryCouplingState.COUPLING) OR (eState = E_GantryCouplingState.DECOUPLING);
+
+// Log one event per state transition, never one per cycle
+IF eState <> ePrevState THEN
+    CASE eState OF
+        E_GantryCouplingState.IDLE:
+            fbLogger(sMsg := 'Gantry coupling idle', eSevr := TcEventSeverity.Info);
+        E_GantryCouplingState.COUPLING:
+            fbLogger(sMsg := 'Gantry coupling started', eSevr := TcEventSeverity.Info);
+        E_GantryCouplingState.COUPLED:
+            fbLogger(sMsg := 'Gantry coupled', eSevr := TcEventSeverity.Info);
+        E_GantryCouplingState.DECOUPLING:
+            fbLogger(sMsg := 'Gantry decoupling started', eSevr := TcEventSeverity.Info);
+        E_GantryCouplingState.FAULT:
+            fbLogger(sMsg := sErrorMessage, eSevr := TcEventSeverity.Error);
+    END_CASE
+    ePrevState := eState;
+END_IF]]></ST>
     </Implementation>
   </POU>
 </TcPlcObject>
