@@ -493,7 +493,12 @@ VAR_INPUT
     eModule : E_Module;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[THIS^.stMotionStage REF= stPiezoStage;
+        <ST><![CDATA[// Reject an unassigned stage reference instead of adopting an invalid pointer
+IF NOT __ISVALIDREF(stPiezoStage) THEN
+    RETURN;
+END_IF
+
+THIS^.stMotionStage REF= stPiezoStage;
 THIS^.eModule := eModule;
 
 ]]></ST>

@@ -24,6 +24,11 @@ END_VAR
 ]]></Declaration>
     <Implementation>
       <ST><![CDATA[
+// Reject unbound caller-supplied references instead of dereferencing an invalid pointer
+IF NOT __ISVALIDREF(astDbStateParams) OR NOT __ISVALIDREF(fbArbiter) THEN
+    RETURN;
+END_IF
+
 rtExec(CLK:=bExecute);
 IF rtExec.Q THEN
     FOR nIter := 0 TO GeneralConstants.MAX_STATES DO

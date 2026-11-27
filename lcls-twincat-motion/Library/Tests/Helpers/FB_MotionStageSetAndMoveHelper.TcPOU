@@ -33,7 +33,12 @@ VAR
 END_VAR
 ]]></Declaration>
     <Implementation>
-      <ST><![CDATA[rtExec(CLK:=bExecute);
+      <ST><![CDATA[// Reject an unbound stage reference instead of dereferencing an invalid pointer
+IF NOT __ISVALIDREF(stMotionStage) THEN
+    RETURN;
+END_IF
+
+rtExec(CLK:=bExecute);
 
 IF rtExec.Q THEN
     stMotionStage.bReset := TRUE;

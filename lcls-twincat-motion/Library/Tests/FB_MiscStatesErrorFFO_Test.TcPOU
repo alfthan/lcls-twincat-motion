@@ -255,6 +255,13 @@ VAR
 END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[
+// Reject unbound caller-supplied references before forwarding them
+IF NOT __ISVALIDREF(fbMiscFFO)
+    OR NOT __ISVALIDREF(fbArbiter)
+    OR NOT __ISVALIDREF(fbFFHWO) THEN
+    RETURN;
+END_IF
+
 // Use anything other than 0 rate, which is its own check
 stBeamReq := PMPS_GVL.cstFullBeam;
 stBeamReq.nTran := 0.5;

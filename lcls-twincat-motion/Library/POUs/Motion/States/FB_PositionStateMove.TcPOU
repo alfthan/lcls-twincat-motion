@@ -99,7 +99,15 @@ VAR
 END_VAR
 ]]></Declaration>
     <Implementation>
-      <ST><![CDATA[// Veto the move for uninitialized and unsafe states
+      <ST><![CDATA[// Reject unbound caller-supplied references with an explicit, latched fault
+IF NOT __ISVALIDREF(stMotionStage) OR NOT __ISVALIDREF(stPositionState) THEN
+    bError := TRUE;
+    nErrorID := E_LCLSMotionError.INVALID;
+    sErrorMessage := 'Invalid VAR_IN_OUT reference in FB_PositionStateMove';
+    RETURN;
+END_IF
+
+// Veto the move for uninitialized and unsafe states
 bAllowMove := stPositionState.bMoveOk AND stPositionState.bValid AND stPositionState.bUpdated;
 
 rtExec(CLK:=bExecute);

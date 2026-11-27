@@ -25,7 +25,15 @@ VAR
 END_VAR
 ]]></Declaration>
     <Implementation>
-      <ST><![CDATA[// Designate Master and SLave Axes
+      <ST><![CDATA[// Reject unbound caller-supplied references instead of dereferencing an invalid pointer
+IF NOT __ISVALIDREF(Master)
+    OR NOT __ISVALIDREF(MasterEnc)
+    OR NOT __ISVALIDREF(Slave)
+    OR NOT __ISVALIDREF(SlaveEnc) THEN
+    RETURN;
+END_IF
+
+// Designate Master and SLave Axes
 Master.bGantryAxis := TRUE;
 Slave.bGantryAxis := TRUE;
 

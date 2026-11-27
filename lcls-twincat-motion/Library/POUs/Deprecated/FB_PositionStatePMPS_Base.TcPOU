@@ -81,6 +81,11 @@ END_VAR]]></Declaration>
     <Action Name="Exec" Id="{5b04393f-c32f-49f1-a610-cb4c89f50675}">
       <Implementation>
         <ST><![CDATA[
+// Reject unbound caller-supplied references instead of dereferencing an invalid pointer
+IF NOT __ISVALIDREF(stMotionStage) OR NOT __ISVALIDREF(arrStates) THEN
+    RETURN;
+END_IF
+
 // Load the pmps parameters as needed
 HandlePmpsDb();
 

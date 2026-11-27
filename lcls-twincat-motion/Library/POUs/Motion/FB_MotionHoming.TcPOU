@@ -51,6 +51,13 @@ VAR CONSTANT
 END_VAR]]></Declaration>
     <Implementation>
       <ST><![CDATA[
+// Reject an unbound stage reference with an explicit, latched fault
+IF NOT __ISVALIDREF(stMotionStage) THEN
+    bError := TRUE;
+    nErrorID := E_LCLSMotionError.INVALID;
+    RETURN;
+END_IF
+
 fbSetPos.Options.ClearPositionLag := TRUE;
 rtExec(CLK:=bExecute);
 ftExec(CLK:=bExecute);

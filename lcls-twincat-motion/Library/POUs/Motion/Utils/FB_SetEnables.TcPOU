@@ -7,7 +7,12 @@ VAR_IN_OUT
     stMotionStage: ST_MotionStage;
 END_VAR]]></Declaration>
     <Implementation>
-      <ST><![CDATA[stMotionStage.bAllForwardEnable := stMotionStage.bLimitForwardEnable AND (stMotionStage.bGantryForwardEnable OR NOT stMotionStage.bGantryAxis) AND stMotionStage.stEPSForwardEnable.bEPS_OK;
+      <ST><![CDATA[// Reject an unbound stage reference instead of dereferencing an invalid pointer
+IF NOT __ISVALIDREF(stMotionStage) THEN
+    RETURN;
+END_IF
+
+stMotionStage.bAllForwardEnable := stMotionStage.bLimitForwardEnable AND (stMotionStage.bGantryForwardEnable OR NOT stMotionStage.bGantryAxis) AND stMotionStage.stEPSForwardEnable.bEPS_OK;
 stMotionStage.bAllBackwardEnable := stMotionStage.bLimitBackwardEnable AND (stMotionStage.bGantryBackwardEnable OR NOT stMotionStage.bGantryAxis) AND stMotionStage.stEPSBackwardEnable.bEPS_OK;
 
 stMotionStage.bAllEnable := stMotionStage.bEnable AND stMotionStage.bHardwareEnable AND stMotionStage.stEPSPowerEnable.bEPS_OK;

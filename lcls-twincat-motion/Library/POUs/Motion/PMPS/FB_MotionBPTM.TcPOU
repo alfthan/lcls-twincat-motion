@@ -64,6 +64,17 @@ END_VAR
 ]]></Declaration>
     <Implementation>
       <ST><![CDATA[
+// Reject unbound caller-supplied references instead of dereferencing an invalid pointer
+IF NOT __ISVALIDREF(astMotionStage)
+    OR NOT __ISVALIDREF(fbArbiter)
+    OR NOT __ISVALIDREF(fbFFHWO)
+    OR NOT __ISVALIDREF(stGoalParams)
+    OR NOT __ISVALIDREF(stTransParams) THEN
+    // Not done moving: the transition cannot proceed without its inputs
+    bDoneMoving := FALSE;
+    RETURN;
+END_IF
+
 CheckCount();
 IF NOT bMotorCountError THEN
     SetDoneMoving();

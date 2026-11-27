@@ -29,7 +29,14 @@ VAR
 END_VAR
 ]]></Declaration>
     <Implementation>
-      <ST><![CDATA[fbNCErrorFFO(
+      <ST><![CDATA[// Reject unbound caller-supplied references before forwarding them to the child FB
+IF NOT __ISVALIDREF(stMotionStage) OR NOT __ISVALIDREF(fbFFHWO) THEN
+    // Cannot monitor the stage: report as tripped so the lost protection is visible
+    bTripped := TRUE;
+    RETURN;
+END_IF
+
+fbNCErrorFFO(
     stMotionStage := stMotionStage,
     fbFFHWO := fbFFHWO,
     bReset := bReset,

@@ -71,6 +71,16 @@ END_VAR
 ]]></Declaration>
     <Implementation>
       <ST><![CDATA[
+// Reject unbound caller-supplied references instead of dereferencing an invalid pointer
+IF NOT __ISVALIDREF(stMotionStageRx)
+    OR NOT __ISVALIDREF(stMotionStageRy)
+    OR NOT __ISVALIDREF(stMotionStageRz)
+    OR NOT __ISVALIDREF(stMotionStageVx)
+    OR NOT __ISVALIDREF(stMotionStageVy)
+    OR NOT __ISVALIDREF(stMotionStageVz) THEN
+    RETURN;
+END_IF
+
 fAlphaRadians := DegToRad(fAlphaDegrees);
 fBetaRadians := DegToRad(fBetaDegrees);
 fGammaRadians := DegToRad(fGammaDegrees);

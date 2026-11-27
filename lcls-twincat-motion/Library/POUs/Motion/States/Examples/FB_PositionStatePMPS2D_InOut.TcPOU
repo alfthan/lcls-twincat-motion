@@ -47,6 +47,18 @@ END_VAR
 ]]></Declaration>
     <Implementation>
       <ST><![CDATA[
+// Reject unbound caller-supplied references instead of dereferencing an invalid pointer
+IF NOT __ISVALIDREF(stMotionStage1)
+    OR NOT __ISVALIDREF(stMotionStage2)
+    OR NOT __ISVALIDREF(stIn1)
+    OR NOT __ISVALIDREF(stOut1)
+    OR NOT __ISVALIDREF(stIn2)
+    OR NOT __ISVALIDREF(stOut2)
+    OR NOT __ISVALIDREF(fbFFHWO)
+    OR NOT __ISVALIDREF(fbArbiter) THEN
+    RETURN;
+END_IF
+
 // Optional: default state names
 IF stIn1.sName = '' THEN
     stIn1.sName := 'IN';

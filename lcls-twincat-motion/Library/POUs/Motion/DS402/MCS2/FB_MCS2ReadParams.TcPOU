@@ -18,7 +18,14 @@ VAR
 END_VAR
 ]]></Declaration>
     <Implementation>
-      <ST><![CDATA[rtExecParamsRead(CLK := (stMCS2Chan1Stage.bAxisParamsInit
+      <ST><![CDATA[// Reject unbound caller-supplied references instead of dereferencing an invalid pointer
+IF NOT __ISVALIDREF(stMCS2Chan1Stage)
+    OR NOT __ISVALIDREF(stMCS2Chan2Stage)
+    OR NOT __ISVALIDREF(stMCS2Chan3Stage) THEN
+    RETURN;
+END_IF
+
+rtExecParamsRead(CLK := (stMCS2Chan1Stage.bAxisParamsInit
                             AND stMCS2Chan2Stage.bAxisParamsInit
                             AND stMCS2Chan3Stage.bAxisParamsInit
                 ));

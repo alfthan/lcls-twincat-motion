@@ -26,7 +26,14 @@ VAR
     bBacklashCompEnable: BOOL;
 END_VAR]]></Declaration>
     <Implementation>
-      <ST><![CDATA[(*Note: Configure within the axis parameters set "position correction" to true *)
+      <ST><![CDATA[// Reject an unbound stage reference with an explicit, latched fault
+IF NOT __ISVALIDREF(stMotionStage) THEN
+    bError := TRUE;
+    nErrorID := E_LCLSMotionError.INVALID;
+    RETURN;
+END_IF
+
+(*Note: Configure within the axis parameters set "position correction" to true *)
 (*Directional change for compensation
   default: positive backlash):
   TRUE -> Negative backlash compensation *)
