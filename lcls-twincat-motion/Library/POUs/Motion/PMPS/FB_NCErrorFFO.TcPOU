@@ -6,7 +6,8 @@
     Configure a ST_MotionStage to trigger an FFO when we have an error.
 
     This can be configured to only apply to specific error ranges,
-    though the default is the normal 16#4XXX NC error range. The error
+    though the default is the normal 16#4XXX NC error range (declared as
+    NCErrorConstants.NC_ERROR_FIRST / NC_ERROR_LAST). The error
     ranges are:
     16#40XX General Errors
     16#41XX Channel Errors
@@ -39,9 +40,9 @@ VAR_INPUT
     // Auto-reset the fault
     bAutoReset: BOOL;
     // The lowest error code that will trip the FFO
-    nLowErrorId: UDINT := 16#4000;
+    nLowErrorId: UDINT := NCErrorConstants.NC_ERROR_FIRST;
     // The highest error code that will trip the FFO
-    nHighErrorId: UDINT := 16#4FFF;
+    nHighErrorId: UDINT := NCErrorConstants.NC_ERROR_LAST;
     // A description of the fault
     sDesc: STRING := 'Motor error';
 END_VAR

@@ -836,7 +836,7 @@ END_VAR
 // needs some pre-conditions to use persistent storage
 IF Enable THEN
     // Check ST_MotionStage for an encoder error (range 0x44nn)
-    bEncError:=  stMotionStage.Axis.Status.Error AND  (  stMotionStage.Axis.Status.ErrorID  >= 16#4400  AND  stMotionStage.Axis.Status.ErrorID <= 16#44FF );
+    bEncError:=  stMotionStage.Axis.Status.Error AND  (  stMotionStage.Axis.Status.ErrorID  >= NCErrorConstants.NC_ENCODER_ERROR_FIRST  AND  stMotionStage.Axis.Status.ErrorID <= NCErrorConstants.NC_ENCODER_ERROR_LAST );
     // Do not save if we're currently loading or if there is an encoder error
     IF NOT bRestoreLoad AND NOT bEncError AND NOT bRestoreWaitRetry THEN
         fSavedPosition :=  stMotionStage.Axis.NcToPlc.ActPos;

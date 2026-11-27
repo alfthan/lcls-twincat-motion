@@ -79,7 +79,7 @@ IF stMotionStage.bError THEN
     IF stDS402Drive.stDriveStatus.InternalLimitActive
         AND stMotionStage.sCustomErrorMessage <> '' THEN
         sMsg := stMotionStage.sCustomErrorMessage;
-    ELSIF stMotionStage.nErrorId >= 16#4000 THEN
+    ELSIF stMotionStage.nErrorId >= NCErrorConstants.NC_ERROR_FIRST THEN
         sMsg := F_MotionErrorCodeLookup(nErrorId := stMotionStage.nErrorId);
     ELSIF stMotionStage.sCustomErrorMessage <> '' THEN
         sMsg := stMotionStage.sCustomErrorMessage;

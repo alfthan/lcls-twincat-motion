@@ -74,7 +74,7 @@ END_VAR
     bWaitRetry R= tonRetry.Q;
 
     // Check ST_MotionStage for an encoder error (range 0x44nn)
-    bEncError := stMotionStage.bError AND stMotionStage.nErrorId >= 16#4400 AND stMotionStage.nErrorId <= 16#44FF;
+    bEncError := stMotionStage.bError AND stMotionStage.nErrorId >= NCErrorConstants.NC_ENCODER_ERROR_FIRST AND stMotionStage.nErrorId <= NCErrorConstants.NC_ENCODER_ERROR_LAST;
 
     // Do not save if we're currently loading or if there is an encoder error
     IF NOT bLoad AND NOT bEncError AND NOT bWaitRetry THEN

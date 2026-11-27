@@ -22,9 +22,10 @@ VAR_OUTPUT
     bTripped: BOOL;
 END_VAR
 VAR
+    // Only NC encoder errors (16#44XX) count, see NCErrorConstants
     fbNCErrorFFO: FB_NCErrorFFO := (
-        nLowErrorId := 16#4400,
-        nHighErrorId := 16#44FF,
+        nLowErrorId := NCErrorConstants.NC_ENCODER_ERROR_FIRST,
+        nHighErrorId := NCErrorConstants.NC_ENCODER_ERROR_LAST,
         sDesc := 'Encoder error');
 END_VAR
 ]]></Declaration>

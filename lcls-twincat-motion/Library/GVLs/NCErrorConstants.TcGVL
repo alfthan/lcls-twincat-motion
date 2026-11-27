@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <GVL Name="NCErrorConstants" Id="{c7c2bef6-7229-4013-9609-fbc4cab8c355}">
+    <Declaration><![CDATA[{attribute 'qualified_only'}
+(*
+    Global NC (Numerical Control) Error Code Constants
+
+    The TwinCAT NC reports its own error ids, which share the number space
+    with our custom error codes. These vendor-defined boundaries are declared
+    here once so that logic that classifies or decodes an error id does not
+    sprinkle 16#4xxx literals through the code base: a change of error code
+    family or range is a single edit here.
+
+    NC error code families (all errors are 16#4XXX):
+    16#40XX General errors
+    16#41XX Channel errors
+    16#42XX Group errors
+    16#43XX Axis errors
+    16#44XX Encoder errors
+    16#45XX Controller errors
+    16#46XX Drive errors
+    16#4AXX Table errors
+    16#4BXX NC PLC errors
+    16#4CXX Kinematic transformation
+
+    There is also a sparsely populated extended NC error range, 16#8XXX:
+    16#8100 - 16#811F: Bode plot (diagnosis)
+    16#8120 - 16#8FFF: Further errors
+*)
+VAR_GLOBAL CONSTANT
+    // Lowest error id of the NC error code family (16#4000).
+    // An error id at or above this value was raised by the NC, not by us.
+    NC_ERROR_FIRST: UDINT := 16#4000;
+    // Highest error id of the NC error code family (16#4FFF).
+    NC_ERROR_LAST: UDINT := 16#4FFF;
+
+    // Lowest NC encoder error id (the 16#44XX encoder family).
+    NC_ENCODER_ERROR_FIRST: UDINT := 16#4400;
+    // Highest NC encoder error id (the 16#44XX encoder family).
+    NC_ENCODER_ERROR_LAST: UDINT := 16#44FF;
+END_VAR]]></Declaration>
+  </GVL>
+</TcPlcObject>
