@@ -7,6 +7,12 @@
     This exists to manage situations where different bits of code may need to move the same motor.
     With just the ST_MotionStage/FB_MotionStage setup it is possible for two function blocks to
     fight with and interfere with each other and with the EPICS commands.
+
+    Every wait for a move to end, or for a stop to be acknowledged, is bounded by a watchdog timer.
+    If a watchdog expires we drop bExecute to stop the stage and latch bError with an explicit
+    timeout error id, staying in the ERROR state until bReset, so that a stalled axis, a stop that
+    never completes or a stuck busy bit (broken drive, dead fieldbus) faults instead of blocking
+    this function block forever.
 *)
 VAR_IN_OUT
     // Motor to move
@@ -27,6 +33,14 @@ VAR_INPUT
     fAcc: LREAL;
     // Optional deceleration
     fDec: LREAL;
+    // Maximum time to wait for a move to complete before raising a timeout error.
+    // Covers both waiting for someone else's move (WAIT_OTHER_MOVE) and waiting for our own
+    // move (WAIT_MY_MOVE). Increase this for stages that legitimately take a long time to travel.
+    tWaitTimeout: TIME := T#10MIN;
+    // Maximum time to wait for the stage to acknowledge a stop before raising a timeout error.
+    // Covers both interrupting someone else's move (STOP_OTHER_MOVE) and stopping our own move
+    // (STOP_MY_MOVE). Must cover the axis deceleration time.
+    tStopTimeout: TIME := T#30S;
 END_VAR
 VAR_OUTPUT
     // True if in error state
@@ -48,6 +62,14 @@ VAR
     nState: UINT := 0;
     bMyMove: BOOL;
     bCausedError: BOOL;
+    // Watchdogs on the waiting states. Each timer is enabled only while its state is active,
+    // so it starts counting when the state is entered and restarts when the state is re-entered.
+    tonWaitOtherMove: TON;
+    tonStopOtherMove: TON;
+    tonWaitMyMove: TON;
+    tonStopMyMove: TON;
+    // TRUE if any watchdog expired this cycle
+    bTimeout: BOOL;
 END_VAR
 // Define local constants for our state machine states
 VAR CONSTANT
@@ -155,6 +177,28 @@ CASE nState OF
     ERROR:
         bMyMove := FALSE;
 END_CASE
+
+// Bound every wait for motion completion or a stop with a watchdog
+tonWaitOtherMove(IN := (nState = WAIT_OTHER_MOVE), PT := tWaitTimeout);
+tonStopOtherMove(IN := (nState = STOP_OTHER_MOVE), PT := tStopTimeout);
+tonWaitMyMove(IN := (nState = WAIT_MY_MOVE), PT := tWaitTimeout);
+tonStopMyMove(IN := (nState = STOP_MY_MOVE), PT := tStopTimeout);
+bTimeout := tonWaitOtherMove.Q OR tonStopOtherMove.Q OR tonWaitMyMove.Q OR tonStopMyMove.Q;
+
+// A stalled axis, an ignored stop or a stuck busy bit must fault instead of blocking forever
+IF bTimeout THEN
+    // Ask for a stop in case we are still commanding a move, then latch the error
+    stMotionStage.bExecute := FALSE;
+    // Stop tracking the stage's own errors so that the timeout error is not overwritten
+    bMyMove := FALSE;
+    nState := ERROR;
+    bError := TRUE;
+    IF tonStopOtherMove.Q OR tonStopMyMove.Q THEN
+        nErrorId := E_LCLSMotionError.STOP_TIMEOUT;
+    ELSE
+        nErrorId := E_LCLSMotionError.TIMEOUT;
+    END_IF
+END_IF
 
 // Transition to the ERROR state if applicable
 IF bMyMove AND stMotionStage.bError THEN
