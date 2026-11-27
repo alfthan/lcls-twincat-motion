@@ -34,6 +34,8 @@ END_VAR
     E_LCLSMotionError.UNSAFE: msg:='Position state unsafe';
     E_LCLSMotionError.INVALID: msg:='Position state invalid';
     E_LCLSMotionError.MCS2_FAULT: msg:='MCS2 drive fault, NC did not latch';
+    E_LCLSMotionError.STEP_TIMEOUT: msg:='Microstep test step timeout, MC_MoveRelative did not report Done';
+    E_LCLSMotionError.INVALID_STEP_COUNT: msg:='Microstep test rejected, nSteps must be greater than 0';
     E_LCLSMotionError.TEST: msg:='Fake testing error';
 
     // Fallbacks

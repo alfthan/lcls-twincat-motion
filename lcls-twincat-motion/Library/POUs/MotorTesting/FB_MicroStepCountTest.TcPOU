@@ -2,27 +2,98 @@
 <TcPlcObject Version="1.1.0.1">
   <POU Name="FB_MicroStepCountTest" Id="{b953130d-6adb-468e-991b-b389a0e4364b}" SpecialFunc="None">
     <Declaration><![CDATA[FUNCTION_BLOCK FB_MicroStepCountTest
+(*
+    Microstep counting test for motor commissioning.
+
+    Step an axis a fixed distance repeatedly and compare the number of microsteps counted from the
+    encoder against the theoretical number, so a mis-set encoder scaling, microstep size or step
+    mode shows up during commissioning.
+
+    Usage:
+        Call this every cycle while the test runs.
+        - Wire Axis to the axis under test.
+        - Set fStepSize (signed, engineering units), fVelocity (EU/s), nSteps, fMicroStep (EU),
+          tSettleTime and tStepTimeout, then raise bExecute.
+        - Each step commands MC_MoveRelative, waits for fbMoveRel.Done, waits tSettleTime for the
+          stage to settle and then samples the encoder position. The loop runs until nSteps steps
+          have completed (bDone) or until a step fails (bError).
+        - Results: nStepsCounted, nTheorySteps, fPercent, fEstMicroSize, nFailedSteps.
+        - A fault is latched in bError and stays latched until bReset. Dropping bExecute does not
+          clear it, it only re-arms the start position.
+
+    Objectives:
+        - Bound every step with a watchdog so the loop always completes, either with bDone or with
+          a latched fault. A drive that is disabled, in following error or not enabled, or a
+          velocity the NC cannot move with, used to leave this block waiting for fbMoveRel.Done
+          forever and silently froze the caller's cycle-state logic.
+        - Report a failed step explicitly: nFailedSteps counts it, bError / nErrorId /
+          sErrorMessage name it.
+        - Reject a step count the loop can never reach (nSteps = 0) instead of idling silently.
+
+    History:
+        Initial version: unknown.
+        2026-11-27, agent: bounded the fbMoveRel.Done wait with the fbStepWatchdog timer, counted
+            an expiry as a failed step and latched a fault with an explicit message; added bBusy,
+            bDone, nFailedSteps, bError, nErrorId, sErrorMessage, bReset and tStepTimeout.
+*)
 VAR_INPUT
+    // TRUE to run the step test, FALSE to sit idle and re-arm the start position.
     bExecute: BOOL;
+    // TRUE to clear a latched fault. A fault is not cleared by dropping bExecute.
+    bReset: BOOL;
+    // Requested step distance in engineering units, the sign selects the direction.
     fStepSize: LREAL;
+    // Number of steps to take before the test completes, must be greater than 0.
     nSteps: UINT;
+    // Expected size of one microstep in engineering units.
     fMicroStep: LREAL;
+    // Requested move velocity in engineering units per second.
     fVelocity: LREAL;
+    // Time to wait after each move before the encoder position is sampled.
     tSettleTime: TIME;
+    // Maximum time a single step may take from command to fbMoveRel.Done. A step that does
+    // not complete inside this window is counted as a failed step and the test faults out.
+    // Must cover the move time and the axis deceleration, so increase it for steps that are
+    // large or move slowly.
+    tStepTimeout: TIME := T#1MIN;
 END_VAR
 VAR_IN_OUT
+    // Axis under test.
     Axis: AXIS_REF;
 END_VAR
 VAR_OUTPUT
+    // Microstep-sized position changes counted so far.
     nStepsCounted: UINT;
+    // Theoretical number of microsteps covered by the travelled distance.
     nTheorySteps: UINT;
+    // nStepsCounted as a percentage of nTheorySteps.
     fPercent: LREAL;
+    // Mean microstep size estimated from the counted steps, in engineering units.
     fEstMicroSize: LREAL;
+    // Number of steps that failed, i.e. that did not reach fbMoveRel.Done inside tStepTimeout.
+    nFailedSteps: UINT;
+    // TRUE while the step loop is running.
+    bBusy: BOOL;
+    // TRUE once nSteps steps have completed.
+    bDone: BOOL;
+    // TRUE while the test is faulted. Latched until bReset.
+    bError: BOOL;
+    // Fault code of the latched fault, see E_LCLSMotionError. 0 while there is no fault.
+    nErrorId: UDINT;
+    // Human readable description of the latched fault, empty while there is no fault.
+    sErrorMessage: STRING;
 END_VAR
 VAR
     fbMoveRel: MC_MoveRelative;
     fbSettleTimer: TON;
+    // Watchdog on one step: enabled while a commanded step still waits for fbMoveRel.Done, so
+    // it restarts with every step.
+    fbStepWatchdog: TON;
+    // Rising edge of bExecute, used to restart the counters of a new test run.
+    rtExecute: R_TRIG;
     bDoMove: BOOL;
+    // TRUE while a commanded step is still waiting for fbMoveRel.Done.
+    bWaitingForMove: BOOL;
     nStepCounter: UINT;
 
     arrPosBuffer: ARRAY [0..99] OF LREAL;
@@ -37,9 +108,36 @@ VAR
     fStepSum: LREAL;
 END_VAR]]></Declaration>
     <Implementation>
-      <ST><![CDATA[// Motion FB
+      <ST><![CDATA[(* Latched fault handling: only the dedicated reset clears it, a dropped bExecute does not. *)
+IF bReset THEN
+    bError := FALSE;
+    nErrorId := 0;
+    sErrorMessage := '';
+    nFailedSteps := 0;
+END_IF
+
+(* A rising edge of bExecute starts a fresh test run. *)
+rtExecute(CLK:=bExecute);
+IF rtExecute.Q THEN
+    nStepCounter := 0;
+    nStepsCounted := 0;
+    nTheorySteps := 0;
+    fPercent := 0;
+    fStepSum := 0;
+    nFailedSteps := 0;
+    bDone := FALSE;
+    bBusy := FALSE;
+    // A step count of zero can never complete the loop: reject it instead of idling silently.
+    IF nSteps = 0 THEN
+        bError := TRUE;
+        nErrorId := E_LCLSMotionError.INVALID_STEP_COUNT;
+        sErrorMessage := 'Microstep test rejected: nSteps must be greater than 0';
+    END_IF
+END_IF
+
+// Motion FB, commanded only while there is no latched fault
 fbMoveRel(Axis:=Axis,
-    Execute:=bDoMove,
+    Execute:=bDoMove AND NOT bError,
     Distance:=fStepSize,
     Velocity:=fVelocity);
 
@@ -48,7 +146,7 @@ fbSettleTimer(IN:=fbMoveRel.Done,
     PT:=tSettleTime);
 
 // Re-enable the move for next cycle
-bDoMove := bExecute AND nStepCounter < nSteps;
+bDoMove := bExecute AND NOT bError AND nStepCounter < nSteps;
 
 // Calculate rolling average
 arrPosBuffer[nArrIndex] := Axis.NcToPlc.ActPos;
@@ -65,8 +163,8 @@ IF NOT bExecute THEN
     fPrevPos := fAvgPos;
 END_IF
 
-// Check results
-IF fbSettleTimer.Q THEN
+// Check results, only while the test is not faulted
+IF fbSettleTimer.Q AND NOT bError THEN
     fStepChange := fAvgPos - fPrevPos;
     // Invert fStepChange if we were doing negative steps
     IF fStepSize < 0 THEN
@@ -85,7 +183,38 @@ IF fbSettleTimer.Q THEN
     nStepCounter := nStepCounter + 1;
     // Reset the move block
     bDoMove := FALSE;
-END_IF]]></ST>
+END_IF
+
+(* Bound the wait for fbMoveRel.Done with a watchdog. The timer is enabled while a step is
+   commanded and has not reported Done yet, so it restarts with every step. *)
+bWaitingForMove := bDoMove AND NOT fbMoveRel.Done;
+fbStepWatchdog(IN:=bWaitingForMove,
+    PT:=tStepTimeout);
+
+(* A step that can never finish must fail instead of waiting forever: a disabled drive, a
+   following error, a missing enable or an unusable velocity all leave fbMoveRel.Done FALSE. *)
+IF NOT bError AND bWaitingForMove THEN
+    IF fbMoveRel.Error THEN
+        // The drive reported its own error: report its id, it is more specific than a timeout
+        nFailedSteps := nFailedSteps + 1;
+        bError := TRUE;
+        nErrorId := fbMoveRel.ErrorID;
+        sErrorMessage := 'Microstep test failed: MC_MoveRelative reported an axis error';
+        bDoMove := FALSE;
+    ELSIF fbStepWatchdog.Q THEN
+        // The step did not reach Done inside tStepTimeout: count it as a failed step and fault
+        nFailedSteps := nFailedSteps + 1;
+        bError := TRUE;
+        nErrorId := E_LCLSMotionError.STEP_TIMEOUT;
+        sErrorMessage := 'Microstep test failed: step timeout, MC_MoveRelative did not reach Done';
+        bDoMove := FALSE;
+    END_IF
+END_IF
+
+(* Report the completion state of the loop. This is the completion bound the step counter alone
+   did not give the caller: either every step completed (bDone) or a fault is latched (bError). *)
+bDone := bExecute AND NOT bError AND (nSteps > 0) AND (nStepCounter >= nSteps);
+bBusy := bExecute AND NOT bError AND NOT bDone;]]></ST>
     </Implementation>
   </POU>
 </TcPlcObject>

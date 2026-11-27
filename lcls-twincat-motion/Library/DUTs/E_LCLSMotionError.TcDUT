@@ -9,6 +9,11 @@ TYPE E_LCLSMotionError :
     UNSAFE := 16#7901,
     INVALID := 16#7902,
     MCS2_FAULT := 16#7903,
+    // FB_MicroStepCountTest: a commanded step did not reach MC_MoveRelative.Done inside
+    // tStepTimeout
+    STEP_TIMEOUT := 16#7906,
+    // FB_MicroStepCountTest: nSteps = 0, a step count the loop can never reach
+    INVALID_STEP_COUNT := 16#7907,
     TEST := 16#FFFF
 ) UDINT;
 END_TYPE
