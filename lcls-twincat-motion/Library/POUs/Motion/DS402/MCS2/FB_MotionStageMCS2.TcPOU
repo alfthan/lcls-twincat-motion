@@ -504,6 +504,9 @@ CASE nCommandLocal OF
         fbStepMode(
             bExecute       := bExecMove AND fbWriteParameters.bParamsSet
                               AND fbDriveManager.bStepModeEnabled,
+            // Bound the move-completion wait: an unresponsive drive faults the
+            // step instead of leaving it busy forever.
+            tMoveTimeout  := UDINT_TO_TIME(stChanParams.nStepTimeout),
             stDS402Drive  := stDS402Drive,
             stMotionStage := stMotionStage
         );

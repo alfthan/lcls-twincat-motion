@@ -61,6 +61,17 @@ STRUCT
     '}
     bStepReverseCmd	: BOOL;
 
+    // Upper bound on a single open-loop step move. It bounds the wait for the
+    // drive's TargetReached status, so a drive that never reports the target
+    // faults the move instead of leaving it busy forever. 0 selects the
+    // FB_MCS2StepMode default.
+    {attribute 'pytmc' := '
+        pv: STEP_TIMEOUT
+        io: io
+        field: DESC Step move timeout (ms)
+    '}
+    nStepTimeout	: UDINT := 10000;
+
     {attribute 'pytmc' := '
         pv: MAX_CLF
         io: io

@@ -1,0 +1,182 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="FB_MCS2StepMode_Test" Id="{b7f1c3a2-51e4-4b8e-9d67-3a1f0c2e5d94}" SpecialFunc="None">
+    <Declaration><![CDATA[FUNCTION_BLOCK FB_MCS2StepMode_Test EXTENDS TcUnit.FB_TestSuite
+(*
+    Unit tests for FB_MCS2StepMode.
+    Verifies that the wait for the drive's TargetReached status is bounded: a drive
+    that never reports the target aborts the step and latches a fault with an error
+    id, instead of leaving the routine busy forever with no diagnostics. Also checks
+    that a move which does reach the target is not disturbed by the timeout, and
+    that the latched fault only clears through the caller's reset.
+    History:
+      2026-11-27  Added with the move-timeout fix (audit finding #146).
+*)
+VAR
+END_VAR
+]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[TestStepMoveTimeout();]]></ST>
+    </Implementation>
+    <Method Name="TestStepMoveTimeout" Id="{b7f1c3a2-51e4-4b8e-9d67-3a1f0c2e5d95}">
+      <Declaration><![CDATA[METHOD PRIVATE TestStepMoveTimeout
+VAR_INST
+    // Subject under test
+    fbSut           : FB_MCS2StepMode;
+    // Drive and stage stand-ins, driven by the test state machine
+    stDrive         : ST_DS402Drive;
+    stMotionStage   : ST_MotionStage;
+    // Test sequencing
+    nState          : INT;
+    // Waits out the settling delay before the timeout may fire
+    tonSettled      : TON;
+    // Fail the test instead of hanging when the timeout never fires
+    tonFaultGuard   : TON;
+    // Fail the test instead of hanging when the move never reports done
+    tonDoneGuard    : TON;
+    // Watchdog under test; well above the FB's 80 ms settle time
+    tTimeout        : TIME := T#200MS;
+END_VAR
+]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[TEST('TestStepMoveTimeout');
+
+CASE nState OF
+    0:
+        // A step command arrives while the drive has not reached the target yet.
+        stDrive.stDriveStatus.TargetReached := FALSE;
+        stDrive.stDriveStatus.Bit13_OpModeSpecific := FALSE;
+        fbSut(
+            bExecute      := TRUE,
+            tMoveTimeout  := tTimeout,
+            stDS402Drive  := stDrive,
+            stMotionStage := stMotionStage
+        );
+        AssertTrue(fbSut.bStepMoveBusy, 'The step move should be busy when the command rises');
+        AssertFalse(stMotionStage.bError, 'The move must not fault when it starts');
+        nState := 10;
+
+    10:
+        // One cycle later the FB has raised the drive Run bit and is waiting.
+        fbSut(
+            bExecute      := TRUE,
+            tMoveTimeout  := tTimeout,
+            stDS402Drive  := stDrive,
+            stMotionStage := stMotionStage
+        );
+        AssertTrue(stDrive.nDriveControl.4, 'The drive Run bit should be raised for the step');
+        AssertTrue(fbSut.bStepMoveBusy, 'The step move should still be busy while running');
+        nState := 20;
+
+    20:
+        // Past the settling delay but well inside the timeout: still no fault.
+        fbSut(
+            bExecute      := TRUE,
+            tMoveTimeout  := tTimeout,
+            stDS402Drive  := stDrive,
+            stMotionStage := stMotionStage
+        );
+        tonSettled(IN := TRUE, PT := T#100MS);
+        IF tonSettled.Q THEN
+            AssertFalse(stMotionStage.bError, 'The move must not fault inside its timeout');
+            AssertTrue(fbSut.bStepMoveBusy, 'The step move should still be busy inside its timeout');
+            nState := 30;
+        END_IF
+
+    30:
+        // The drive never reports the target: the timeout must abort and fault.
+        fbSut(
+            bExecute      := TRUE,
+            tMoveTimeout  := tTimeout,
+            stDS402Drive  := stDrive,
+            stMotionStage := stMotionStage
+        );
+        IF stMotionStage.bError THEN
+            AssertTrue(stMotionStage.nErrorId = E_LCLSMotionError.TIMEOUT,
+                       'The move timeout should latch E_LCLSMotionError.TIMEOUT');
+            AssertFalse(fbSut.bStepMoveBusy, 'A timed-out step must stop reporting busy');
+            AssertFalse(fbSut.bStepMoveDone, 'A timed-out step must not report done');
+            AssertFalse(stDrive.nDriveControl.4, 'The drive Run bit should be dropped on a timeout');
+            nState := 40;
+        ELSE
+            tonFaultGuard(IN := TRUE, PT := T#5S);
+            IF tonFaultGuard.Q THEN
+                AssertTrue(FALSE, 'The move timeout never fired');
+                nState := 90;
+                TEST_FINISHED();
+            END_IF
+        END_IF
+
+    40:
+        // The fault is latched: dropping the execute input must not clear it.
+        fbSut(
+            bExecute      := FALSE,
+            tMoveTimeout  := tTimeout,
+            stDS402Drive  := stDrive,
+            stMotionStage := stMotionStage
+        );
+        AssertTrue(stMotionStage.bError, 'Dropping the command must not clear the latched fault');
+        AssertTrue(stMotionStage.nErrorId = E_LCLSMotionError.TIMEOUT,
+                   'Dropping the command must not clear the latched error id');
+        nState := 50;
+
+    50:
+        // A caller reset clears the fault and returns the routine to idle.
+        stMotionStage.bError   := FALSE;
+        stMotionStage.nErrorId := 0;
+        fbSut(
+            bExecute      := FALSE,
+            tMoveTimeout  := tTimeout,
+            stDS402Drive  := stDrive,
+            stMotionStage := stMotionStage
+        );
+        AssertFalse(stMotionStage.bError, 'The reset should clear the fault');
+        AssertFalse(fbSut.bStepMoveBusy, 'The routine should be idle after the reset');
+        nState := 60;
+
+    60:
+        // A normal step move: the drive reports the target, so no timeout applies.
+        stDrive.stDriveStatus.TargetReached := TRUE;
+        fbSut(
+            bExecute      := TRUE,
+            tMoveTimeout  := tTimeout,
+            stDS402Drive  := stDrive,
+            stMotionStage := stMotionStage
+        );
+        AssertTrue(fbSut.bStepMoveBusy, 'The step move should be busy when the command rises');
+        AssertFalse(stMotionStage.bError, 'A fresh move must not fault');
+        nState := 70;
+
+    70:
+        fbSut(
+            bExecute      := TRUE,
+            tMoveTimeout  := tTimeout,
+            stDS402Drive  := stDrive,
+            stMotionStage := stMotionStage
+        );
+        IF fbSut.bStepMoveDone THEN
+            AssertFalse(stMotionStage.bError, 'A step that reaches the target must not fault');
+            AssertFalse(fbSut.bStepMoveBusy, 'A completed step must stop reporting busy');
+            AssertFalse(stDrive.nDriveControl.4, 'The drive Run bit should be dropped when done');
+            nState := 80;
+        ELSE
+            tonDoneGuard(IN := TRUE, PT := T#5S);
+            IF tonDoneGuard.Q THEN
+                AssertTrue(FALSE, 'The step move never reported done');
+                nState := 90;
+                TEST_FINISHED();
+            END_IF
+        END_IF
+
+    80:
+        nState := 90;
+        TEST_FINISHED();
+
+    90:
+        // Test finished: hold here until the suite collection moves on.
+        nState := 90;
+END_CASE]]></ST>
+      </Implementation>
+    </Method>
+  </POU>
+</TcPlcObject>

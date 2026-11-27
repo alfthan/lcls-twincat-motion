@@ -1,9 +1,21 @@
 ﻿<?xml version="1.0" encoding="utf-8"?>
 <TcPlcObject Version="1.1.0.1">
   <POU Name="FB_MCS2StepMode" Id="{a0cda8fc-6342-4ae1-b3b5-7e5da20f78df}" SpecialFunc="None">
-    <Declaration><![CDATA[FUNCTION_BLOCK FB_MCS2StepMode
+    <Declaration><![CDATA[(*
+    Open-loop step move over the DS402 interface. Raises the drive Run bit, waits
+    for the settling delay and the drive's TargetReached status, then reports done.
+    Every wait here is bounded: tonMoveTimeout aborts the step and latches a fault
+    when the drive never reports the target.
+    History:
+      2026-11-27  Bound the move-completion wait with a configurable timeout that
+                  aborts the step and latches a fault with an explicit message
+                  (audit finding #146).
+*)
+FUNCTION_BLOCK FB_MCS2StepMode
 VAR_INPUT
-    bExecute : BOOL;
+    bExecute     : BOOL;
+    // Upper bound on one step move. T#0S selects cDefaultMoveTimeout.
+    tMoveTimeout : TIME;
 END_VAR
 VAR_IN_OUT
     stDS402Drive         : ST_DS402Drive;
@@ -20,8 +32,16 @@ VAR
     bReset :  BOOL;
     bHalt : BOOL;
     tonSettlingTime     : TON;
+    // Bounds the wait for TargetReached; see tMoveTimeout.
+    tonMoveTimeout      : TON;
+    // Timeout applied on this cycle, after sanitizing tMoveTimeout.
+    tTimeoutActive      : TIME;
     {attribute 'hide'}
     rtStepMove               : R_TRIG;
+END_VAR
+VAR CONSTANT
+    // Bound used when the caller supplies no usable timeout (T#0S).
+    cDefaultMoveTimeout : TIME := T#10S;
 END_VAR
 ]]></Declaration>
     <Implementation>
@@ -31,6 +51,13 @@ END_VAR
 END_IF
 
 rtStepMove(CLK := bExecute);
+
+// The timeout usually comes from a PV. Zero (or negative) would expire on the
+// first cycle, so fall back to the default bound instead of faulting instantly.
+tTimeoutActive := tMoveTimeout;
+IF tTimeoutActive <= T#0S THEN
+    tTimeoutActive := cDefaultMoveTimeout;
+END_IF
 
 CASE eStepState OF
     E_MoveState.IDLING:
@@ -59,10 +86,15 @@ CASE eStepState OF
         ELSIF stDS402Drive.stDriveStatus.Bit13_OpModeSpecific THEN
             stMotionStage.bError := TRUE;
             eStepState := E_MoveState.ERROR;
-        ELSE
-            IF tonSettlingTime.Q AND stDS402Drive.stDriveStatus.TargetReached THEN
-                eStepState := E_MoveState.REACHED;
-            END_IF
+        ELSIF tonSettlingTime.Q AND stDS402Drive.stDriveStatus.TargetReached THEN
+            eStepState := E_MoveState.REACHED;
+        ELSIF tonMoveTimeout.Q THEN
+            // The drive never reported the target. Stop the step and latch a
+            // fault so the caller cannot stay busy forever with no diagnostics.
+            stDS402Drive.nDriveControl.4 := FALSE;
+            stMotionStage.bError   := TRUE;
+            stMotionStage.nErrorId := E_LCLSMotionError.TIMEOUT;
+            eStepState := E_MoveState.ERROR;
         END_IF
 
     E_MoveState.INTERRUPTED:
@@ -89,6 +121,9 @@ CASE eStepState OF
         END_IF
 END_CASE
 tonSettlingTime(PT:=T#80MS);
+// Only the motion-completion wait is bounded. The timer re-arms in every other
+// state, so each new step starts from a clean count.
+tonMoveTimeout(IN := (eStepState = E_MoveState.IN_PROGRESS), PT := tTimeoutActive);
 bHalt := FALSE;
 bReset := FALSE;]]></ST>
     </Implementation>
