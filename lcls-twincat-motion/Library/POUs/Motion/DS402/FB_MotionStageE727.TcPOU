@@ -513,19 +513,69 @@ THIS^.eModule := eModule;
       </Implementation>
     </Method>
     <Method Name="Home" Id="{33a0ebff-5827-46e7-8879-a94910cac0f9}">
-      <Declaration><![CDATA[METHOD PUBLIC Home
+      <Declaration><![CDATA[(*
+Home - DS402 / E-727 drive-side homing (E_EpicsHomeCmd.AutoMethod)
+
+Purpose:
+    Run one homing routine on the drive and report it through bHomeBusy/bHomeDone.
+
+Usage:
+    Called every cycle while the requested command is HOME. A homing command is
+    the rising edge of bExecHome: the request is taken once and the sequence then
+    runs to completion on its own. Holding bExecHome TRUE never starts a second
+    routine, and dropping it before the sequence has started withdraws the
+    request. bHomeDone is set when the drive reports the referencing move done
+    and stays set: it is cleared only by a new accepted command or by the fault
+    path, so the caller keeps its Done until it asks for the next command.
+    Faults are latched in stMotionStage.bError and clear only with
+    stMotionStage.bReset.
+
+Objectives:
+    Execute homing on the rising edge of the command, never on its level.
+    Keep the Busy/Done/Error result visible after completion until acknowledged.
+
+History:
+    2026-11-27 - Make the homing command edge-triggered: a held command could
+                 restart homing and clear Done without acknowledgement.
+*)
+METHOD PUBLIC Home
 VAR_INPUT
     Enable 				: BOOL;
 END_VAR
 VAR_INST
     {attribute 'hide'}
     bMove 				: BOOL;
+    // Homing request latched by the rising edge of bExecHome
+    {attribute 'hide'}
+    bHomeReq 			: BOOL;
+    // Rising edge of bExecHome, i.e. the caller's homing command
+    {attribute 'hide'}
+    rtHomeExec 			: R_TRIG;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[CASE eHomeMode OF
+        <ST><![CDATA[// Homing is a command, not a level: the request is taken on the rising edge of
+// bExecHome and held in bHomeReq until the state machine starts the sequence.
+// A command that is merely held TRUE therefore never starts a second routine.
+rtHomeExec(CLK:=bExecHome);
+IF rtHomeExec.Q THEN
+    bHomeReq := TRUE;
+END_IF
+// Command dropped before the sequence started: withdraw the pending request
+bHomeReq R= NOT bExecHome;
+// Request consumed: the sequence owns the drive until it returns to IDLING
+IF eHomeState <> E_MoveState.IDLING THEN
+    bHomeReq := FALSE;
+END_IF
+
+CASE eHomeMode OF
     E_EpicsHomeCmd.AutoMethod:
-        bMove S=  bExecHome;
+        (* Serviced from the accepted request until the sequence is back in
+           IDLING, so Done/Error stay visible after completion and only a new
+           rising edge of bExecHome can start another homing routine. *)
+        bMove := bHomeReq OR (eHomeState <> E_MoveState.IDLING);
     E_EpicsHomeCmd.NONE:
+        (* No homing method configured: there is no sequence to run, so Busy/Done
+           only report whether a homing command is pending. *)
         bMove := FALSE;
         bHomeBusy :=  bExecHome;
         bHomeDone := NOT  bExecHome;
@@ -535,9 +585,9 @@ END_CASE
 
 IF bMove THEN
     CASE eHomeState OF
-        // Wait for a rising edge
+        // Wait for the rising edge of the homing command
         E_MoveState.IDLING:
-            IF bHomeModeEnabled AND bExecHome THEN
+            IF bHomeModeEnabled AND bHomeReq THEN
                 bHomeDone := FALSE;
                 bHomeBusy := TRUE;
                 stMotionStage.bDone := FALSE;
