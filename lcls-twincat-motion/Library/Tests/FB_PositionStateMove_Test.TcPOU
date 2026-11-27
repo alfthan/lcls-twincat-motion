@@ -89,9 +89,27 @@ TestBadStates(4);
 // Test that we need a new bExecute to start a new move if a move goes from unsafe to safe
 TestMoveOk(5);
 
-// Wait a few cycles for remaining errors to propagate
+// Wait a few cycles for remaining errors to propagate, but never wait forever:
+// the stall timer below bounds this wait so a stuck move cannot hang the suite
 tonCleanup(IN:=bOneTestDone, PT:=T#1s);
-IF tonCleanup.Q THEN
+IF nTestCounter > 0 AND tonTimer.Q THEN
+    // The stall timeout expired, so this test will never finish on its own.
+    // Drop every command, clear the reset requests, and advance to the next
+    // test instead of waiting on a move or motor that may never go not-busy.
+    // Without this the cleanup wait below is unbounded and hangs the suite.
+    fbMove(
+        stMotionStage:=stMotionStage,
+        stPositionState:=stDummyPos,
+        bExecute:=FALSE,
+        bReset:=FALSE,
+    );
+    stMotionStage.bExecute := FALSE;
+    stMotionStage.bReset := FALSE;
+
+    bOneTestDone := FALSE;
+    nTestCounter := nTestCounter + 1;
+    tonTimer(IN:=FALSE);
+ELSIF tonCleanup.Q THEN
     IF fbMove.bBusy THEN
         fbMove(
             stMotionStage:=stMotionStage,
