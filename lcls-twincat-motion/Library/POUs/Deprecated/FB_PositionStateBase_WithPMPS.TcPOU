@@ -4,30 +4,72 @@
     <Declaration><![CDATA[{attribute 'obsolete' := 'Use FB_PositionStatePMPS1D instead'}
 FUNCTION_BLOCK FB_PositionStateBase_WithPMPS EXTENDS FB_PositionStateBase
 (*
-    Handles EPICS moves between multiple states for a single axis with PMPS.
-    Should be subclassed for a specific enumSet and enumGet.
-    See body comment  or FB_PositionStateInOut_WithPMPS for an implementation example.
+    FB_PositionStateBase_WithPMPS
+    Deprecated: use FB_PositionStatePMPS1D instead.
+
+    Purpose:
+        Base function block for EPICS-requested moves between multiple named positions on a
+        single axis, where every move is gated by the PMPS (Photon Machine Protection System)
+        arbiter and hardware fast-fault output. It adds the arbiter and fast-fault plumbing to
+        FB_PositionStateBase, so a subclass only has to translate its set/get enums and fill
+        in the position states.
+
+    Usage:
+        1. Subclass this FB: the subclass maps setState/getState onto its own enums.
+        2. Fill arrStates (inherited from FB_PositionStateBase) with the valid positions.
+        3. Wire fbArbiter and fbFFHWO to the PLC's arbiter and hardware fast-fault output.
+        4. Set sPmpsDeviceName and sTransitionKey to the keys used in the PMPS database.
+        5. Once per cycle: setState := enumSet; Exec(); enumGet := getState;
+        See FB_PositionStateInOut_WithPMPS for a complete minimal example.
+
+    Objectives:
+        - Let the axis move only when the beam parameters requested for the goal state are
+          authorized by the arbiter, or when the arbiter wait has timed out and carrying on
+          anyway is explicitly allowed.
+        - Raise a hardware fast fault whenever the live beam parameters do not satisfy the
+          current state's requirement, whenever a transition times out and whenever a
+          transition errors, so the beam is tripped instead of being left unprotected.
+        - Keep the axis within the MPS bounds of the goal state, widened by a deadband, and
+          report encoder faults through the fast-fault output.
+
+    History:
+        2020-07-10  Zachary Lentz   Initial version (PMPS rework of the position state FBs).
+        2022-03-09  nwaters        Added the bBPOKAutoReset input.
+        2022-11-11  Zachary Lentz  Added PMPS database loading (sPmpsDeviceName, fbStatePMPS).
+        2022-12-13  Zachary Lentz  Added the sTransitionKey transition lookup.
+        2023-03-15  Zachary Lentz  Marked obsolete in favour of FB_PositionStatePMPS1D.
 *)
 VAR_IN_OUT
+    // PMPS arbiter: holds this axis' beam parameter requests and reports whether they are granted
     fbArbiter: FB_Arbiter;
+    // Hardware fast-fault output: PMPS and encoder fast faults from this FB are reported here
     fbFFHWO: FB_HardwareFFOutput;
 END_VAR
 VAR_INPUT
+    // Device name this axis is listed under in the PMPS beam-parameter database, e.g. 'IM1L0:XTES'
     sPmpsDeviceName: STRING;
+    // Database key of the beam-parameter set used while moving between states, e.g. 'OUT'
     sTransitionKey: STRING;
+    // IF TRUE, motion waits for arbiter permission; if FALSE motion is authorized locally
     {attribute 'pytmc' := '
         pv: PMPS:ARB:ENABLE
         io: io
     '}
     bArbiterEnabled: BOOL := TRUE;
+    // Max time to wait for arbiter permission (PLC TIME, default 1 s); T#0s disables the wait
     tArbiterTimeout: TIME := T#1s;
+    // If TRUE, a timed-out arbiter wait still permits the move (and raises a fast fault)
     bMoveOnArbiterTimeout: BOOL := TRUE;
+    // Slack in motor position units (mm for EPICS motor axes) added to the goal state MPS bounds
     fStateBoundaryDeadband: LREAL := 0;
+    // If TRUE, the beam-parameter mismatch fast fault auto-clears once the beam params are OK
     bBPOKAutoReset: BOOL := False;
 END_VAR
 VAR
+    // Sub-block doing the PMPS database read, arbiter requests and fast-fault handling for this axis
     {attribute 'pytmc' := 'pv: PMPS'}
     fbStatePMPS: FB_PositionStatePMPS;
+    // Raises a fast fault if the axis encoder reports an error
     fbEncErrFFO: FB_EncErrorFFO;
 END_VAR
 ]]></Declaration>
