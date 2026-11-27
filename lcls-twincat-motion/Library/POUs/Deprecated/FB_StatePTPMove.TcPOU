@@ -3,13 +3,40 @@
   <POU Name="FB_StatePTPMove" Id="{425806ee-2b8b-43fd-93f1-34dff217483a}" SpecialFunc="None">
     <Declaration><![CDATA[{attribute 'obsolete' := 'Use FB_PositionStateMove instead'}
 FUNCTION_BLOCK FB_StatePTPMove
-// Do not use, this is deprecated
+(*
+    Deprecated: use FB_PositionStateMove instead.
+
+    Request an absolute move to a named position state on an axis controlled
+    via EPICS.
+
+    Objectives:
+    - Copy the requested position, velocity, acceleration and deceleration from a
+      caller-supplied ST_PositionState into ST_MotionStage and command the move.
+    - Validate those setpoints against the axis limits configured in the
+      numerical controller before anything is written to the hardware, so that an
+      out-of-range or mistyped state (for example a state table entry beyond the
+      axis soft limits) is rejected instead of commanding a runaway move or a
+      drive fault.
+
+    Usage:
+    - Fill in stPositionState, set bMoveOk when the move is safe, then pulse
+      bExecute to start the move.
+    - bError and sError report both motor faults and rejected setpoints. A
+      rejection stays latched, so it is not lost when bExecute drops, and is
+      cleared by a rising edge on bReset.
+
+    History:
+    - 2026-11-27: validate the requested setpoints against the configured axis
+      limits before commanding hardware (audit finding #141).
+*)
 VAR_INPUT
+    // Position state to move to, holds the requested setpoints
     {attribute 'pytmc' := '
         pv:
     '}
     stPositionState: ST_PositionState;
 
+    // On rising edge, start a move to stPositionState
     {attribute 'pytmc' := '
         pv: GO
         io: io
@@ -18,12 +45,18 @@ VAR_INPUT
     '}
     bExecute: BOOL;
 
+    // TRUE if a move to this position state is currently permitted
     bMoveOk: BOOL;
+
+    // On rising edge, clear a latched rejected setpoint error
+    bReset: BOOL;
 END_VAR
 VAR_IN_OUT
+    // Motor to move
     stMotionStage: ST_MotionStage;
 END_VAR
 VAR_OUTPUT
+    // TRUE if the motor is positioned at this state
     {attribute 'pytmc' := '
         pv: AT_STATE
         io: input
@@ -32,6 +65,7 @@ VAR_OUTPUT
     '}
     bAtState: BOOL;
 
+    // TRUE if our most recent move has finished
     {attribute 'pytmc' := '
         pv: DMOV
         io: input
@@ -40,6 +74,7 @@ VAR_OUTPUT
     '}
     bDone: BOOL;
 
+    // TRUE while a move is in progress
     {attribute 'pytmc' := '
         pv: BUSY
         io: input
@@ -48,6 +83,7 @@ VAR_OUTPUT
     '}
     bBusy: BOOL;
 
+    // TRUE if the motor is in an error state or a setpoint was rejected
     {attribute 'pytmc' := '
         pv: ERR
         io: input
@@ -56,6 +92,7 @@ VAR_OUTPUT
     '}
     bError: BOOL;
 
+    // Message identifying the error or the rejected setpoint
     {attribute 'pytmc' := '
         pv: ERRMSG
         io: input
@@ -63,17 +100,45 @@ VAR_OUTPUT
     sError: STRING;
 END_VAR
 VAR
+    // Rising edge of bExecute, starts a move request
     bExecTrig: R_TRIG;
+    // Falling edge of bExecute, stops the commanded move
     bExecEnd: F_TRIG;
+    // Rising edge of bReset, clears a latched setpoint error
+    rtReset: R_TRIG;
+    // TRUE if the requested setpoints passed the limit checks
+    bSetpointsValid: BOOL;
+    // Most recent actual position of the axis
     fActPosition: LREAL;
+    // Lower end of the window that counts as being at the state
     fLowPos: LREAL;
+    // Upper end of the window that counts as being at the state
     fHighPos: LREAL;
+    // Latched: the most recent request was outside the configured limits
+    bSetpointRejected: BOOL;
+    // Message that explains why the requested setpoints were rejected
+    sSetpointError: STRING;
 END_VAR
 ]]></Declaration>
     <Implementation>
-      <ST><![CDATA[bExecTrig(CLK:=bExecute);
+      <ST><![CDATA[rtReset(CLK:=bReset);
+IF rtReset.Q THEN
+    bSetpointRejected := FALSE;
+    sSetpointError := '';
+END_IF
+
+bExecTrig(CLK:=bExecute);
 IF bExecTrig.Q AND bMoveOk THEN
-    IF NOT stMotionStage.bBusy AND NOT stMotionStage.bError THEN
+    // Check the requested setpoints against the configured axis limits before
+    // anything is written to the hardware
+    bSetpointsValid := ValidateSetpoints();
+    IF NOT bSetpointsValid THEN
+        bSetpointRejected := TRUE;
+    ELSIF NOT stMotionStage.bBusy AND NOT stMotionStage.bError THEN
+        // A validated request is a known-safe state to clear an older rejection
+        bSetpointRejected := FALSE;
+        sSetpointError := '';
+        // Every setpoint below has been validated against the configured limits
         stMotionStage.bExecute := TRUE;
         stMotionStage.nCommand := E_EpicsMotorCmd.MOVE_ABSOLUTE;
         stMotionStage.fPosition := stPositionState.fPosition;
@@ -84,8 +149,14 @@ IF bExecTrig.Q AND bMoveOk THEN
         bBusy := TRUE;
     END_IF
 END_IF
-bError := stMotionStage.bError;
-sError := stMotionStage.sErrorMessage;
+
+// A rejected setpoint is reported on the same outputs as a motor fault
+bError := bSetpointRejected OR stMotionStage.bError;
+IF bSetpointRejected THEN
+    sError := sSetpointError;
+ELSE
+    sError := stMotionStage.sErrorMessage;
+END_IF
 
 fActPosition := stMotionStage.stAxisStatus.fActPosition;
 fLowPos := stPositionState.fPosition - stPositionState.fDelta;
@@ -106,11 +177,92 @@ IF bExecEnd.Q AND bBusy THEN
     stMotionStage.bExecute := FALSE;
 END_IF
 
-IF NOT stMotionStage.bExecute OR NOT bExecute THEN
+IF bSetpointRejected THEN
+    // The move was never started, so it can be neither busy nor done
+    bDone := FALSE;
+    bBusy := FALSE;
+    bExecute := FALSE;
+ELSIF NOT stMotionStage.bExecute OR NOT bExecute THEN
     bDone := TRUE;
     bBusy := FALSE;
     bExecute := FALSE;
 END_IF]]></ST>
     </Implementation>
+    <Method Name="ValidateSetpoints" Id="{077f5adf-0bd8-4c43-b291-f97f6591b852}">
+      <Declaration><![CDATA[METHOD PRIVATE ValidateSetpoints : BOOL
+(*
+    Check the requested setpoints in stPositionState against the limits that are
+    configured for the axis in stMotionStage.
+
+    Returns TRUE if the request may be commanded. Returns FALSE and fills in
+    sSetpointError if the position is outside the enabled axis soft limits or if
+    the velocity, acceleration or deceleration exceeds the configured maximum.
+
+    A limit that is not configured is not checked, there is nothing to compare
+    the request against: a soft end whose control bit is not set, and a maximum
+    that reads zero because the NC parameters have not been read yet.
+*)
+VAR
+    // Exposed axis parameters we validate against, for brevity below
+    stLimits: ST_AxisParameterSetExposed;
+END_VAR
+]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[ValidateSetpoints := FALSE;
+stLimits := stMotionStage.stAxisParametersExposed;
+
+// A position that is not a number can never be commanded. Written as a
+// negated comparison because a NaN is not equal to anything, itself included.
+IF NOT (stPositionState.fPosition = stPositionState.fPosition) THEN
+    sSetpointError := 'Rejected move: requested position is not a number';
+    RETURN;
+END_IF
+
+// A speed of zero or less can never be a valid move command. Written as a
+// negated comparison so that a NaN velocity is rejected as well.
+IF NOT (stPositionState.fVelocity > 0) THEN
+    sSetpointError := 'Rejected move: requested velocity is not a positive number';
+    RETURN;
+END_IF
+
+// Acceleration and deceleration are optional, zero means "use the axis default"
+IF stPositionState.fAccel <> 0 AND NOT (stPositionState.fAccel > 0) THEN
+    sSetpointError := 'Rejected move: requested acceleration is not a positive number';
+    RETURN;
+END_IF
+IF stPositionState.fDecel <> 0 AND NOT (stPositionState.fDecel > 0) THEN
+    sSetpointError := 'Rejected move: requested deceleration is not a positive number';
+    RETURN;
+END_IF
+
+// The requested speed and dynamics must stay within the configured maxima
+IF stLimits.fVeloMaximum > 0 AND NOT (stPositionState.fVelocity <= stLimits.fVeloMaximum) THEN
+    sSetpointError := CONCAT('Rejected move: velocity above configured maximum ', LREAL_TO_STRING(stLimits.fVeloMaximum));
+    RETURN;
+END_IF
+IF stLimits.fAccelerationMax > 0 AND NOT (stPositionState.fAccel <= stLimits.fAccelerationMax) THEN
+    sSetpointError := CONCAT('Rejected move: acceleration above configured maximum ', LREAL_TO_STRING(stLimits.fAccelerationMax));
+    RETURN;
+END_IF
+IF stLimits.fDecelerationMax > 0 AND NOT (stPositionState.fDecel <= stLimits.fDecelerationMax) THEN
+    sSetpointError := CONCAT('Rejected move: deceleration above configured maximum ', LREAL_TO_STRING(stLimits.fDecelerationMax));
+    RETURN;
+END_IF
+
+// The requested position must stay inside the enabled axis soft limits, which
+// is also where the vendor's physical span of the stage ends
+IF stLimits.bEncEnableSoftEndMinControl.0 AND NOT (stPositionState.fPosition >= stLimits.fEncSoftEndMin) THEN
+    sSetpointError := CONCAT('Rejected move: position below configured lower limit ', LREAL_TO_STRING(stLimits.fEncSoftEndMin));
+    RETURN;
+END_IF
+IF stLimits.bEncEnableSoftEndMaxControl.0 AND NOT (stPositionState.fPosition <= stLimits.fEncSoftEndMax) THEN
+    sSetpointError := CONCAT('Rejected move: position above configured upper limit ', LREAL_TO_STRING(stLimits.fEncSoftEndMax));
+    RETURN;
+END_IF
+
+sSetpointError := '';
+ValidateSetpoints := TRUE;]]></ST>
+      </Implementation>
+    </Method>
   </POU>
 </TcPlcObject>

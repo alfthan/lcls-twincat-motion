@@ -22,6 +22,7 @@ VAR
     fb_StatePMPSEnablesND_Test: FB_StatePMPSEnablesND_Test;
     fb_PositionStatePMPSND_Test: FB_PositionStatePMPSND_Test;
     fb_StateSetupHelper_Test: FB_StateSetupHelper_Test;
+    fb_StatePTPMove_Test: FB_StatePTPMove_Test;
     fb_TestStateInitTiming: FB_TestStateInitTiming;
     fb_PowerEnableMode_Test: FB_PowerEnableMode_Test;
     fb_MotionBacklashCompensation_Test: FB_MotionBacklashCompensation_Test;

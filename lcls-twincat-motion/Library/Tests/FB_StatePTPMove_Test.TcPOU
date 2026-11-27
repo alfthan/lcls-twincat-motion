@@ -1,0 +1,532 @@
+<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="FB_StatePTPMove_Test" Id="{f488ecfa-46e5-495c-8984-b1b6fe6e221c}" SpecialFunc="None">
+    <Declaration><![CDATA[FUNCTION_BLOCK FB_StatePTPMove_Test EXTENDS TcUnit.FB_TestSuite
+(*
+    Test that FB_StatePTPMove validates the requested setpoints before it
+    commands a move.
+
+    A request that stays within the configured axis limits is commanded as
+    before. A request outside the limits, or with a velocity/acceleration that
+    exceeds its configured maximum, is rejected: nothing is written to the
+    hardware and the error is latched until it is reset.
+
+    Each test is single cycle: FB_StatePTPMove is called directly, several times
+    in the same cycle, to simulate consecutive PLC cycles.
+*)
+VAR
+    // Stage under test, its NC limits are filled in by InitLimits
+    stMotionStage: ST_MotionStage;
+    // The function block under test
+    fbStatePTPMove: FB_StatePTPMove;
+    // The state we ask the function block to move to
+    stPositionState: ST_PositionState;
+    // Position written to the stage by each test, a rejected request must not change it
+    fSentinel: LREAL := 1234.5;
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[// Configure the axis limits that FB_StatePTPMove has to validate against
+InitLimits();
+
+// A request inside all of the limits is still commanded as before
+TestAcceptGoodMove();
+// Positions outside the enabled soft limits are rejected
+TestRejectPositionAboveUpperLimit();
+TestRejectPositionBelowLowerLimit();
+// Speeds and dynamics above the configured maxima are rejected
+TestRejectVelocityAboveMax();
+TestRejectAccelerationAboveMax();
+TestRejectDecelerationAboveMax();
+// A speed that is not a positive number can never be commanded
+TestRejectNonPositiveVelocity();
+// A rejection must not be lost while the caller holds the request
+TestRejectLatchesUntilReset();]]></ST>
+    </Implementation>
+    <Method Name="InitLimits" Id="{acd87fad-632f-4b38-a4fd-ed152f3450c6}">
+      <Declaration><![CDATA[METHOD PRIVATE InitLimits
+(*
+    Set the NC limits of the stage under test: this is what the function block
+    compares every requested setpoint against.
+
+    The soft ends are enabled (bit 0 of the control words) so that a position
+    outside of them has to be rejected, exactly like a state table entry beyond
+    the axis soft limits.
+*)
+VAR
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[stMotionStage.bAxisParamsInit := TRUE;
+
+// Soft limits the axis may not be commanded outside of
+stMotionStage.stAxisParametersExposed.fEncSoftEndMin := -50;
+stMotionStage.stAxisParametersExposed.fEncSoftEndMax := 50;
+stMotionStage.stAxisParametersExposed.bEncEnableSoftEndMinControl := 1;
+stMotionStage.stAxisParametersExposed.bEncEnableSoftEndMaxControl := 1;
+
+// Maximum dynamics of the axis
+stMotionStage.stAxisParametersExposed.fVeloMaximum := 10;
+stMotionStage.stAxisParametersExposed.fAccelerationMax := 100;
+stMotionStage.stAxisParametersExposed.fDecelerationMax := 100;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="SetGoodState" Id="{ecb193c3-52b0-4d70-86c4-d34b5a118c90}">
+      <Declaration><![CDATA[METHOD PRIVATE SetGoodState
+(*
+    Fill in a position state that passes every limit check of the function block.
+*)
+VAR
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[stPositionState.sName := 'GOOD';
+stPositionState.fPosition := 25;
+stPositionState.fDelta := 1;
+stPositionState.fVelocity := 5;
+stPositionState.fAccel := 50;
+stPositionState.fDecel := 50;
+stPositionState.bValid := TRUE;
+stPositionState.bMoveOk := TRUE;
+stPositionState.bUpdated := TRUE;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="ResetFb" Id="{a58e046f-0164-44d0-b008-c76db2ddde9b}">
+      <Declaration><![CDATA[METHOD PRIVATE ResetFb
+(*
+    Leave the function block idle and without a latched error, so that the next
+    request in a test is a fresh rising edge on bExecute.
+*)
+VAR
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[fbStatePTPMove(
+    stMotionStage:=stMotionStage,
+    stPositionState:=stPositionState,
+    bExecute:=FALSE,
+    bMoveOk:=TRUE,
+    bReset:=FALSE);
+
+fbStatePTPMove(
+    stMotionStage:=stMotionStage,
+    stPositionState:=stPositionState,
+    bExecute:=FALSE,
+    bMoveOk:=TRUE,
+    bReset:=TRUE);
+
+fbStatePTPMove(
+    stMotionStage:=stMotionStage,
+    stPositionState:=stPositionState,
+    bExecute:=FALSE,
+    bMoveOk:=TRUE,
+    bReset:=FALSE);]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="TestAcceptGoodMove" Id="{c6823c37-c635-4ff6-a235-fb92529429ae}">
+      <Declaration><![CDATA[METHOD PRIVATE TestAcceptGoodMove
+(*
+    A request inside the configured limits must be commanded to the hardware.
+*)
+VAR
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[TEST('TestAcceptGoodMove');
+
+SetGoodState();
+stMotionStage.bExecute := FALSE;
+stMotionStage.fPosition := fSentinel;
+ResetFb();
+
+fbStatePTPMove(
+    stMotionStage:=stMotionStage,
+    stPositionState:=stPositionState,
+    bExecute:=TRUE,
+    bMoveOk:=TRUE,
+    bReset:=FALSE);
+
+AssertFalse(
+    Condition:=fbStatePTPMove.bError,
+    Message:=CONCAT('A valid move was rejected: ', fbStatePTPMove.sError),
+);
+AssertTrue(
+    Condition:=stMotionStage.bExecute,
+    Message:='A valid move was not commanded',
+);
+AssertEquals_LREAL(
+    Expected:=stPositionState.fPosition,
+    Actual:=stMotionStage.fPosition,
+    Delta:=0.001,
+    Message:='The requested position did not reach the stage',
+);
+AssertEquals_LREAL(
+    Expected:=stPositionState.fVelocity,
+    Actual:=stMotionStage.fVelocity,
+    Delta:=0.001,
+    Message:='The requested velocity did not reach the stage',
+);
+AssertEquals_LREAL(
+    Expected:=stPositionState.fAccel,
+    Actual:=stMotionStage.fAcceleration,
+    Delta:=0.001,
+    Message:='The requested acceleration did not reach the stage',
+);
+AssertEquals_LREAL(
+    Expected:=stPositionState.fDecel,
+    Actual:=stMotionStage.fDeceleration,
+    Delta:=0.001,
+    Message:='The requested deceleration did not reach the stage',
+);
+
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="TestRejectPositionAboveUpperLimit" Id="{ba614bd6-0b56-4c9b-81d7-2782f6017901}">
+      <Declaration><![CDATA[METHOD PRIVATE TestRejectPositionAboveUpperLimit
+(*
+    A requested position beyond the configured upper soft limit must be rejected
+    instead of being commanded.
+*)
+VAR
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[TEST('TestRejectPositionAboveUpperLimit');
+
+SetGoodState();
+stPositionState.fPosition := stMotionStage.stAxisParametersExposed.fEncSoftEndMax + 500;
+stMotionStage.bExecute := FALSE;
+stMotionStage.fPosition := fSentinel;
+ResetFb();
+
+fbStatePTPMove(
+    stMotionStage:=stMotionStage,
+    stPositionState:=stPositionState,
+    bExecute:=TRUE,
+    bMoveOk:=TRUE,
+    bReset:=FALSE);
+
+AssertTrue(
+    Condition:=fbStatePTPMove.bError,
+    Message:='A position above the upper soft limit was not rejected',
+);
+AssertFalse(
+    Condition:=stMotionStage.bExecute,
+    Message:='A rejected position still started a move',
+);
+AssertEquals_LREAL(
+    Expected:=fSentinel,
+    Actual:=stMotionStage.fPosition,
+    Delta:=0.001,
+    Message:='A rejected position was written to the stage',
+);
+AssertTrue(
+    Condition:=FIND(fbStatePTPMove.sError, 'upper limit') > 0,
+    Message:=CONCAT('The error message does not name the limit: ', fbStatePTPMove.sError),
+);
+AssertFalse(
+    Condition:=fbStatePTPMove.bBusy,
+    Message:='A rejected request must not report busy',
+);
+AssertFalse(
+    Condition:=fbStatePTPMove.bDone,
+    Message:='A rejected request must not report done',
+);
+
+ResetFb();
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="TestRejectPositionBelowLowerLimit" Id="{808d28bd-68aa-4856-96ea-16b2b70e0f67}">
+      <Declaration><![CDATA[METHOD PRIVATE TestRejectPositionBelowLowerLimit
+(*
+    A requested position beyond the configured lower soft limit must be rejected
+    instead of being commanded.
+*)
+VAR
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[TEST('TestRejectPositionBelowLowerLimit');
+
+SetGoodState();
+stPositionState.fPosition := stMotionStage.stAxisParametersExposed.fEncSoftEndMin - 500;
+stMotionStage.bExecute := FALSE;
+stMotionStage.fPosition := fSentinel;
+ResetFb();
+
+fbStatePTPMove(
+    stMotionStage:=stMotionStage,
+    stPositionState:=stPositionState,
+    bExecute:=TRUE,
+    bMoveOk:=TRUE,
+    bReset:=FALSE);
+
+AssertTrue(
+    Condition:=fbStatePTPMove.bError,
+    Message:='A position below the lower soft limit was not rejected',
+);
+AssertFalse(
+    Condition:=stMotionStage.bExecute,
+    Message:='A rejected position still started a move',
+);
+AssertEquals_LREAL(
+    Expected:=fSentinel,
+    Actual:=stMotionStage.fPosition,
+    Delta:=0.001,
+    Message:='A rejected position was written to the stage',
+);
+AssertTrue(
+    Condition:=FIND(fbStatePTPMove.sError, 'lower limit') > 0,
+    Message:=CONCAT('The error message does not name the limit: ', fbStatePTPMove.sError),
+);
+
+ResetFb();
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="TestRejectVelocityAboveMax" Id="{6d120f01-1f1a-49be-8b98-a2c38d8e2586}">
+      <Declaration><![CDATA[METHOD PRIVATE TestRejectVelocityAboveMax
+(*
+    A requested velocity above the configured maximum must be rejected.
+*)
+VAR
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[TEST('TestRejectVelocityAboveMax');
+
+SetGoodState();
+stPositionState.fVelocity := stMotionStage.stAxisParametersExposed.fVeloMaximum + 900;
+stMotionStage.bExecute := FALSE;
+stMotionStage.fPosition := fSentinel;
+ResetFb();
+
+fbStatePTPMove(
+    stMotionStage:=stMotionStage,
+    stPositionState:=stPositionState,
+    bExecute:=TRUE,
+    bMoveOk:=TRUE,
+    bReset:=FALSE);
+
+AssertTrue(
+    Condition:=fbStatePTPMove.bError,
+    Message:='A velocity above the configured maximum was not rejected',
+);
+AssertFalse(
+    Condition:=stMotionStage.bExecute,
+    Message:='A rejected velocity still started a move',
+);
+AssertEquals_LREAL(
+    Expected:=fSentinel,
+    Actual:=stMotionStage.fPosition,
+    Delta:=0.001,
+    Message:='A rejected velocity was written to the stage',
+);
+AssertTrue(
+    Condition:=FIND(fbStatePTPMove.sError, 'velocity') > 0,
+    Message:=CONCAT('The error message does not name the velocity: ', fbStatePTPMove.sError),
+);
+
+ResetFb();
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="TestRejectAccelerationAboveMax" Id="{a30d2d3b-7f34-4a1c-b809-1306b6881a86}">
+      <Declaration><![CDATA[METHOD PRIVATE TestRejectAccelerationAboveMax
+(*
+    A requested acceleration above the configured maximum must be rejected.
+*)
+VAR
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[TEST('TestRejectAccelerationAboveMax');
+
+SetGoodState();
+stPositionState.fAccel := stMotionStage.stAxisParametersExposed.fAccelerationMax + 900;
+stMotionStage.bExecute := FALSE;
+stMotionStage.fPosition := fSentinel;
+ResetFb();
+
+fbStatePTPMove(
+    stMotionStage:=stMotionStage,
+    stPositionState:=stPositionState,
+    bExecute:=TRUE,
+    bMoveOk:=TRUE,
+    bReset:=FALSE);
+
+AssertTrue(
+    Condition:=fbStatePTPMove.bError,
+    Message:='An acceleration above the configured maximum was not rejected',
+);
+AssertFalse(
+    Condition:=stMotionStage.bExecute,
+    Message:='A rejected acceleration still started a move',
+);
+AssertTrue(
+    Condition:=FIND(fbStatePTPMove.sError, 'acceleration') > 0,
+    Message:=CONCAT('The error message does not name the acceleration: ', fbStatePTPMove.sError),
+);
+
+ResetFb();
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="TestRejectDecelerationAboveMax" Id="{09405351-918a-475d-a5e5-7965cb56d89d}">
+      <Declaration><![CDATA[METHOD PRIVATE TestRejectDecelerationAboveMax
+(*
+    A requested deceleration above the configured maximum must be rejected.
+*)
+VAR
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[TEST('TestRejectDecelerationAboveMax');
+
+SetGoodState();
+stPositionState.fDecel := stMotionStage.stAxisParametersExposed.fDecelerationMax + 900;
+stMotionStage.bExecute := FALSE;
+stMotionStage.fPosition := fSentinel;
+ResetFb();
+
+fbStatePTPMove(
+    stMotionStage:=stMotionStage,
+    stPositionState:=stPositionState,
+    bExecute:=TRUE,
+    bMoveOk:=TRUE,
+    bReset:=FALSE);
+
+AssertTrue(
+    Condition:=fbStatePTPMove.bError,
+    Message:='A deceleration above the configured maximum was not rejected',
+);
+AssertFalse(
+    Condition:=stMotionStage.bExecute,
+    Message:='A rejected deceleration still started a move',
+);
+AssertTrue(
+    Condition:=FIND(fbStatePTPMove.sError, 'deceleration') > 0,
+    Message:=CONCAT('The error message does not name the deceleration: ', fbStatePTPMove.sError),
+);
+
+ResetFb();
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="TestRejectNonPositiveVelocity" Id="{35bdebb5-d35b-4956-b377-4f0f8fc0c05a}">
+      <Declaration><![CDATA[METHOD PRIVATE TestRejectNonPositiveVelocity
+(*
+    A velocity of zero or less is not a move command and must be rejected, even
+    though it is below the configured maximum.
+*)
+VAR
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[TEST('TestRejectNonPositiveVelocity');
+
+SetGoodState();
+stPositionState.fVelocity := 0;
+stMotionStage.bExecute := FALSE;
+stMotionStage.fPosition := fSentinel;
+ResetFb();
+
+fbStatePTPMove(
+    stMotionStage:=stMotionStage,
+    stPositionState:=stPositionState,
+    bExecute:=TRUE,
+    bMoveOk:=TRUE,
+    bReset:=FALSE);
+
+AssertTrue(
+    Condition:=fbStatePTPMove.bError,
+    Message:='A zero velocity was not rejected',
+);
+AssertFalse(
+    Condition:=stMotionStage.bExecute,
+    Message:='A zero velocity still started a move',
+);
+
+SetGoodState();
+stPositionState.fVelocity := -5;
+stMotionStage.bExecute := FALSE;
+stMotionStage.fPosition := fSentinel;
+ResetFb();
+
+fbStatePTPMove(
+    stMotionStage:=stMotionStage,
+    stPositionState:=stPositionState,
+    bExecute:=TRUE,
+    bMoveOk:=TRUE,
+    bReset:=FALSE);
+
+AssertTrue(
+    Condition:=fbStatePTPMove.bError,
+    Message:='A negative velocity was not rejected',
+);
+AssertFalse(
+    Condition:=stMotionStage.bExecute,
+    Message:='A negative velocity still started a move',
+);
+
+ResetFb();
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="TestRejectLatchesUntilReset" Id="{dcdfddba-4c12-49d3-900b-4ac5e21c9a6d}">
+      <Declaration><![CDATA[METHOD PRIVATE TestRejectLatchesUntilReset
+(*
+    A rejection is latched: it is neither lost when the caller drops bExecute nor
+    when a new, still invalid request arrives. It clears on a rising edge of the
+    dedicated reset input.
+*)
+VAR
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[TEST('TestRejectLatchesUntilReset');
+
+SetGoodState();
+stPositionState.fPosition := stMotionStage.stAxisParametersExposed.fEncSoftEndMax + 500;
+stMotionStage.bExecute := FALSE;
+stMotionStage.fPosition := fSentinel;
+ResetFb();
+
+// A first, invalid request is rejected
+fbStatePTPMove(
+    stMotionStage:=stMotionStage,
+    stPositionState:=stPositionState,
+    bExecute:=TRUE,
+    bMoveOk:=TRUE,
+    bReset:=FALSE);
+AssertTrue(
+    Condition:=fbStatePTPMove.bError,
+    Message:='The invalid request was not rejected',
+);
+
+// Dropping the request must not clear the error
+fbStatePTPMove(
+    stMotionStage:=stMotionStage,
+    stPositionState:=stPositionState,
+    bExecute:=FALSE,
+    bMoveOk:=TRUE,
+    bReset:=FALSE);
+AssertTrue(
+    Condition:=fbStatePTPMove.bError,
+    Message:='The rejection was lost when the request dropped',
+);
+
+// Only the dedicated reset input clears it
+fbStatePTPMove(
+    stMotionStage:=stMotionStage,
+    stPositionState:=stPositionState,
+    bExecute:=FALSE,
+    bMoveOk:=TRUE,
+    bReset:=TRUE);
+AssertFalse(
+    Condition:=fbStatePTPMove.bError,
+    Message:='The rejection was not cleared by the reset input',
+);
+AssertEquals_LREAL(
+    Expected:=fSentinel,
+    Actual:=stMotionStage.fPosition,
+    Delta:=0.001,
+    Message:='A rejected position was written to the stage',
+);
+
+ResetFb();
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+  </POU>
+</TcPlcObject>

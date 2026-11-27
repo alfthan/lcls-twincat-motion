@@ -693,6 +693,9 @@
     <Compile Include="Tests\FB_StateSetupHelper_Test.TcPOU">
       <SubType>Code</SubType>
     </Compile>
+    <Compile Include="Tests\FB_StatePTPMove_Test.TcPOU">
+      <SubType>Code</SubType>
+    </Compile>
     <Compile Include="Tests\FB_TestHelperSetAndMove_Test.TcPOU">
       <SubType>Code</SubType>
     </Compile>
