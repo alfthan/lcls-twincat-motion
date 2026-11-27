@@ -43,7 +43,8 @@ VAR_OUTPUT
 END_VAR
 VAR
     bInit: BOOL;
-    arrStates: ARRAY[1..15] OF ST_PositionState;
+    // Pre-allocated state table, sized by the shared state count constant
+    arrStates: ARRAY[1..GeneralConstants.MAX_STATES] OF ST_PositionState;
 
     {attribute 'pytmc' := '
         pv:
@@ -60,9 +61,9 @@ IF NOT bInit THEN
     bInit := TRUE;
 END_IF
 
-// Stuff first two values of the 15 element array for the manager
-arrStates[1] := stOut;
-arrStates[2] := stIn;
+// Stuff the OUT and IN slots of the state table for the manager
+arrStates[MotionConstants.STATE_INDEX_OUT] := stOut;
+arrStates[MotionConstants.STATE_INDEX_IN] := stIn;
 
 // Call the function block every cycle
 fbStateManager(

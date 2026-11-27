@@ -15,6 +15,21 @@ VAR_GLOBAL CONSTANT
     If you are not sure how many motors are used per state block, check MOTION_GVL.nMaxStateMotorCount
     *)
     MAX_STATE_MOTORS: UINT := 3;
+    (*
+    Slot indices of the standard IN/OUT state table.
+
+    The standard IN/OUT axes keep UNKNOWN in state slot 0 (no move requested),
+    OUT in slot 1 and IN in slot 2 - see E_EpicsInOut / ENUM_EpicsInOut_INT.
+    The IN/OUT state wrappers reference these constants instead of raw array
+    indices, so the slot layout is declared once here and a layout change is
+    picked up by every wrapper instead of silently mapping positions to the
+    wrong slots.
+
+    The number of state slots itself is declared once as
+    GeneralConstants.MAX_STATES - do not add a second state count cap here.
+    *)
+    STATE_INDEX_OUT: INT := 1;
+    STATE_INDEX_IN: INT := 2;
 END_VAR]]></Declaration>
   </GVL>
 </TcPlcObject>

@@ -12,13 +12,13 @@ VAR_IN_OUT
     // Motor to move
     stMotionStage: ST_MotionStage;
 
-    // Allocated space for 15 states besides Unknown (16 is the max for an EPICS MBBI)
+    // Allocated space for MAX_STATES states besides Unknown (16 is the max for an EPICS MBBI)
     {attribute 'pytmc' := '
         pv:
         io: io
         expand: %.2d
     '}
-    arrStates: ARRAY[1..15] OF ST_PositionState;
+    arrStates: ARRAY[1..GeneralConstants.MAX_STATES] OF ST_PositionState;
 
     // Corresponding arrStates index to move to, or 0 if no move selected
     setState: INT;
@@ -83,7 +83,7 @@ VAR
     stUnknown: ST_PositionState;
     stGoal: ST_PositionState;
     fbStateMove: FB_PositionStateMove;
-    fbStateInternal: ARRAY[1..15] OF FB_PositionStateInternal;
+    fbStateInternal: ARRAY[1..GeneralConstants.MAX_STATES] OF FB_PositionStateInternal;
     nIndex: INT;
     bNewGoal: BOOL;
     bInnerExec: BOOL;
@@ -112,7 +112,7 @@ IF NOT bInit THEN
 END_IF
 
 // All state internal handlers
-FOR nIndex := 1 TO 15 DO
+FOR nIndex := 1 TO GeneralConstants.MAX_STATES DO
     IF arrStates[nIndex].bValid THEN
         fbStateInternal[nIndex](
             stMotionStage:=stMotionStage,
@@ -123,7 +123,7 @@ END_FOR
 // Check where we are by going through all possible states.
 // Note this favors the highest-number state that we're at, it's up to you to make your states mutually exclusive.
 getState := 0;
-FOR nIndex := 1 TO 15 DO
+FOR nIndex := 1 TO GeneralConstants.MAX_STATES DO
     IF F_AtPositionState(stMotionStage:=stMotionStage, stPositionState:=arrStates[nIndex]) THEN
         getState := nIndex;
     END_IF
