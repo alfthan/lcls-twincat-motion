@@ -97,6 +97,14 @@ VAR
     tonSyncHoming 		: TON;
     {attribute 'hide'}
     tonSlowParamReadTimer: TON;
+    (* Homing watchdog. The drive-side homing sequence only leaves its
+       STARTED/IN_PROGRESS states on a drive status change or a user stop, so
+       the drive must finish the referencing move within tHomeTimeout; on expiry
+       the move is halted and a latched fault is raised. Tune per stage type
+       when a referencing move legitimately takes longer. *)
+    tHomeTimeout 		: TIME := T#60S;
+    {attribute 'hide'}
+    tonHomeTimeout 		: TON;
     {attribute 'hide'}
     NCParamsTimer 		: TON;
     {attribute 'hide'}
@@ -522,7 +530,13 @@ VAR_INST
     bMove 				: BOOL;
 END_VAR]]></Declaration>
       <Implementation>
-        <ST><![CDATA[CASE eHomeMode OF
+        <ST><![CDATA[(*	Drive-side (DS402 homing mode) homing sequence.
+    Starts the referencing move and waits for the drive status bits to report
+    it finished. The wait on the drive is bounded by tHomeTimeout: on expiry
+    the move is halted and a latched E_LCLSMotionError.HOMING_TIMEOUT fault is
+    raised instead of leaving the axis busy forever.
+*)
+CASE eHomeMode OF
     E_EpicsHomeCmd.AutoMethod:
         bMove S=  bExecHome;
     E_EpicsHomeCmd.NONE:
@@ -532,6 +546,10 @@ END_VAR]]></Declaration>
     ELSE
         bMove := FALSE;
 END_CASE
+
+(*	Homing watchdog. Serviced every cycle homing owns the drive so a drive
+    that never reaches TargetReached cannot keep bHomeBusy TRUE forever.*)
+tonHomeTimeout(IN := bMove AND bHomeBusy, PT := tHomeTimeout);
 
 IF bMove THEN
     CASE eHomeState OF
@@ -603,6 +621,22 @@ IF bMove THEN
                 eHomeState:=E_MoveState.IDLING;
             END_IF
     END_CASE
+
+    (*	Watchdog expired: the drive still has not reported the referencing move
+        done. Stop the drive, drop busy/done and raise a latched fault so a stuck
+        homing shows up as an axis error (clear with stMotionStage.bReset) rather
+        than as an axis that stays busy forever. The check is gated on bHomeBusy
+        so a homing that completes on the expiry cycle is still reported as done.*)
+    IF tonHomeTimeout.Q AND bHomeBusy THEN
+        bStop := TRUE;
+        stDS402Drive.nDriveControl.8 := TRUE;
+        bHomeBusy := FALSE;
+        bHomeDone := FALSE;
+        stMotionStage.bError := TRUE;
+        stMotionStage.nErrorId := E_LCLSMotionError.HOMING_TIMEOUT;
+        stMotionStage.sCustomErrorMessage := 'Homing timeout: drive did not report done';
+        eHomeState := E_MoveState.ERROR;
+    END_IF
 END_IF]]></ST>
       </Implementation>
     </Method>
