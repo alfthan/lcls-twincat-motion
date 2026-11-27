@@ -12,6 +12,7 @@ VAR_INPUT
     bEnable : BOOL;
 END_VAR
 VAR
+    // Shared structured logger: reports the fault transition and message updates
     {attribute 'hide'}
     fbLogError          : FB_LogMotionError;
     sMsg                : STRING;
@@ -101,7 +102,16 @@ IF stMotionStage.bError THEN
     IF sMsg <> '' THEN
         stMotionStage.sErrorMessage := sMsg;
     END_IF
-END_IF]]></ST>
+END_IF
+
+// Report the fault through the shared structured logger. sErrorMessage is only the
+// operator display string; without this call diagnostics consumers never see the
+// event. FB_LogMotionError emits once per fault transition or message change, so
+// calling it every cycle does not spam the log.
+fbLogError(
+    stMotionStage := stMotionStage,
+    bEnable       := TRUE,
+);]]></ST>
     </Implementation>
   </POU>
 </TcPlcObject>

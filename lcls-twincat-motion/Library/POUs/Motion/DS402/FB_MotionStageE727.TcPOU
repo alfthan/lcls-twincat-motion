@@ -35,6 +35,9 @@ VAR
     fbMcWriteParameter 	: MC_WriteParameter;
     {attribute 'hide'}
     fbMcReadParams		: MC_ReadParameterSet;
+    // Shared structured logger: reports fault transitions and message updates
+    {attribute 'hide'}
+    fbLogError : FB_LogMotionError;
     {attribute 'hide'}
     bEnPosLag 			: BOOL;
     {attribute 'hide'}
@@ -432,6 +435,15 @@ IF stMotionStage.sCustomErrorMessage <> ''
     stMotionStage.sErrorMessage := stMotionStage.sCustomErrorMessage;
 END_IF
 
+// Report the fault through the shared structured logger. The message merge above only
+// feeds the operator display; without this call diagnostics consumers never see the
+// event. FB_LogMotionError emits once per fault transition or message change, so
+// calling it every cycle does not spam the log.
+fbLogError(
+    stMotionStage := stMotionStage,
+    bEnable       := TRUE,
+);
+
 (*Clear motion flag when error occurs*)
 IF stMotionStage.bError  THEN
     stMotionStage.bBusy := FALSE;
@@ -801,8 +813,6 @@ VAR_INST
     {attribute 'hide'}
     nPiezoErrorCode   	: UDINT;
     {attribute 'hide'}
-    fbLogError  		: FB_LogMotionError;
-    {attribute 'hide'}
     ftErrorReadDone  	: F_TRIG;
 END_VAR]]></Declaration>
       <Implementation>
@@ -820,7 +830,8 @@ IF ftErrorReadDone.Q THEN
         stMotionStage.nErrorId := nPiezoErrorCode;
     END_IF
     stMotionStage.sErrorMessage := F_MotionErrorCodeLookup(nErrorId:=stMotionStage.nErrorId);
-    fbLogError( stMotionStage:=stMotionStage, bEnable:=stMotionStage.bError);
+    // The fault is reported once, centrally, by the block-level fbLogError call at the
+    // end of the cycle body; logging here as well would duplicate every event.
 END_IF
 
 ]]></ST>
