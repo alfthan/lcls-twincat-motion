@@ -3,25 +3,73 @@
   <POU Name="FB_LogMotionError" Id="{9500aa77-a355-4e4c-85a0-c8788ac59e2a}" SpecialFunc="None">
     <Declaration><![CDATA[FUNCTION_BLOCK FB_LogMotionError
 (*
-    If the motion struct has an error, log it.
+    Purpose: report a motion error on a ST_MotionStage through the shared
+    logger (FB_LogMessage, eSubsystem E_Subsystem.MOTION, eSevr
+    TcEventSeverity.Error), with a json blob that identifies the motor and
+    the NC error.
+
+    Usage: call this once per cycle with the stage struct wired to
+    stMotionStage and keep bEnable TRUE. bEnable is a level enable for the
+    message, not for the detection - the trigger itself is edge based, so a
+    transition that happens while bEnable is FALSE is not logged later.
+    Nothing needs to be acknowledged or reset.
 
     The log condition is:
     - When bError goes TRUE (catch transition from no error to error)
-    - When the error message changes while bError is TRUE (catch transition from error a to error b)
+    - When the error message changes while bError is TRUE (catch transition
+      from error a to error b)
 
-    Includes the motor name and the NC error id in the json blob
+    The blob carries sName (the motor), stAxisParameters.sAxisName and
+    stAxisParameters.AxisId (the NC axis), nErrorId (the NC error id), and
+    the NC axis' actual position and following error as "position" and
+    "position_lag" - those are LREAL in the axis' configured engineering
+    units (mm or degrees per the NC scaling), not raw encoder counts.
+
+    Objectives:
+    - Give the IOC log a per-motor error trail without emitting a message
+      every cycle.
+    - Make an entry identifiable without knowing the PLC layout: motor name,
+      axis name/id and NC error id travel in the structured part of it.
+
+    Author: Zachary Lentz <zlentz@slac.stanford.edu>
+    History: 2021-10-08  Zachary Lentz  created, first pass at logging all
+                                        motion stage errors
+             2021-10-11  Zachary Lentz  fixed error message timing
+             2021-10-12  Zachary Lentz  added more json keys, revised the
+                                        trigger logic to avoid duplicates
+             2026-11-27  Scirix Agent  added purpose/usage/objectives and
+                                        declaration comments, no logic
+                                        changed (audit finding #162, task #120)
 *)
 VAR_IN_OUT
+    // Stage to report on: bError and sErrorMessage drive the trigger; sName,
+    // stAxisParameters.sAxisName/AxisId and nErrorId are copied into the blob
+    // as motor name, axis name/id and NC error id; stAxisStatus.fActPosition
+    // and fActDiff supply the position and following error in the axis'
+    // engineering units (mm or degrees).
     stMotionStage: ST_MotionStage;
 END_VAR
 VAR_INPUT
+    // Level enable for the log message: only log while TRUE. Detection runs
+    // every scan regardless, so an error that appears while this is FALSE is
+    // not logged when it goes TRUE again.
     bEnable: BOOL;
 END_VAR
 VAR
+    // Shared logger instance the message is emitted through (routed to the
+    // IEC log; subject to the logger's own circuit breaker).
     fbLogMessage: FB_LogMessage;
+    // Rising edge detector on stMotionStage.bError: catches the transition
+    // from no error to error.
     rtNewError: R_TRIG;
+    // TRUE when sErrorMessage is non-empty and differs from sPrevErr: catches
+    // error a -> error b while bError stays TRUE.
     bChangedError: BOOL;
+    // Last error message seen, refreshed every scan so only new messages are
+    // logged. Updated even while bEnable is FALSE.
     sPrevErr: STRING;
+    // JSON builder for the structured part of the message; reset after each
+    // log so the document does not grow across errors.
     fbJson: FB_JsonSaxWriter;
 END_VAR
 ]]></Declaration>
