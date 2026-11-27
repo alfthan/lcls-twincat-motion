@@ -3,22 +3,113 @@
   <POU Name="FB_MotionStageNCParams" Id="{ffafdde1-c9c9-04ad-2047-9434c7439ed8}" SpecialFunc="None">
     <Declaration><![CDATA[FUNCTION_BLOCK FB_MotionStageNCParams
 (*
-    Read and refresh axis parameters struct on ST_MotionStage
+    Purpose: poll the NC parameter set of one axis and publish the selected
+    subset of it to EPICS. Each refresh reads stMotionStage.Axis with
+    MC_ReadParameterSet into stMotionStage.stAxisParameters, then copies the
+    tunable limits out of it - max velocity, accelerations, position lag
+    monitor, soft end limits, encoder scaling and offset - into
+    stMotionStage.stAxisParametersExposed. That exposed struct is what the
+    pytmc pragmas on ST_AxisParameterSetExposed publish as PLC:AxisPar, so this
+    block is how the NC limits that motion commands are checked against become
+    visible to the IOC.
+
+    Usage: instantiate one per stage and call it every PLC cycle with the stage
+    struct wired to stMotionStage. FB_MotionStage does exactly this, with
+    bEnable hard-wired TRUE and tRefreshDelay := T#1s. This is a periodic
+    refresh, not a command: there is nothing to acknowledge, reset or wait for.
+    Reads are paced so the NC is not polled every scan - the request latch
+    bExecute is set by timer.Q tRefreshDelay after the previous read finished
+    and dropped on Done or Error - while the copy into
+    stAxisParametersExposed runs every scan from the last completed read, so
+    EPICS always shows the most recent successful values. Nothing here detects
+    a missing read: if the refresh stops, the published parameters simply stay
+    at their last values. stMotionStage.bAxisParamsInit is latched TRUE by the
+    first completed read and never cleared by this block; it is the project's
+    "axis parameters have been read at least once" flag, which other blocks use
+    to tell "not read yet" from "read, and the values happen to be zero".
+
+    Objectives:
+    - Keep the NC parameters current in the PLC without every caller writing
+      its own polling logic or issuing a parameter read every single cycle.
+    - Publish the configured limits in engineering units so operators and the
+      IOC can see what the motion commands are actually limited to.
+    - Keep a failed read observable through bError instead of letting stale
+      parameters look current.
+
+    Author: Zachary Lentz <zlentz@slac.stanford.edu>
+    History: 2020-07-08  Zachary Lentz    created with the PMPS implementation
+                                          baseline
+             2020-07-14  Zachary Lentz    midnight hour bugfixes
+             2023-03-15  Zachary Lentz    DUT_MotionStage renamed ST_MotionStage
+                                          (find/replace)
+             2023-05-18  Zachary Lentz    project version pinned outside of the
+                                          individual files
+             2024-04-04  Nicholas Lentz   added ST_AxisParameterSetExposed and the
+                                          copy of the selected parameters
+             2024-04-08  Nicholas Lentz   exposed encoder scaling and offset
+             2026-11-27  Scirix Agent     added purpose/usage/objectives/history and
+                                          declaration comments, no logic changed
+                                          (audit finding #340, task #190)
 *)
 VAR_IN_OUT
+    // The motor whose parameters are read and published: Axis is the NC axis
+    // handed to MC_ReadParameterSet, stAxisParameters receives that function
+    // block's ST_AxisParameterSet output (Tc2_MC2 struct, each field in its own
+    // NC unit - see the fields listed in the body), stAxisParametersExposed is
+    // the subset copied out for EPICS, and bAxisParamsInit is latched TRUE here
+    // after the first completed read.
     stMotionStage: ST_MotionStage;
 END_VAR
 VAR_INPUT
+    // Level enable for the refresh: while FALSE, Execute on mcReadParams is
+    // held FALSE, so no new parameter read is started and the published values
+    // stay at their last read. Normal operation keeps this TRUE for the whole
+    // life of the PLC, as FB_MotionStage does.
     bEnable: BOOL;
+    // Off-time between parameter reads, as a TIME. TwinCAT TIME has 1 ms
+    // resolution, so this is a duration in ms (T#1s = 1000 ms) - not a cycle
+    // count and not an engineering-unit quantity. It is counted from the end of
+    // the previous read, so the real refresh period is tRefreshDelay plus the
+    // time the NC takes to answer. This is a polling interval only: it is not a
+    // timeout, and nothing here faults or gives up if a read never completes.
     tRefreshDelay: TIME;
 END_VAR
 VAR_OUTPUT
+    // Pass-through of MC_ReadParameterSet.Error for the most recent read
+    // request. TRUE means that read came back as failed - typically an invalid
+    // axis reference, an NC that is not configured, or an unknown parameter -
+    // and FALSE means it did not. This block does not latch it: bError is
+    // re-assigned on every call, so it follows the function block's own reset
+    // behaviour and drops as soon as that clears it, at the latest when the next
+    // refresh is issued. It does not raise stMotionStage.bError and is not
+    // counted anywhere, so a caller that needs a latched read fault has to latch
+    // it itself.
     bError: BOOL;
 END_VAR
 VAR
+    // TwinCAT NC function block that reads one parameter set from one axis.
+    // Parameter is stMotionStage.stAxisParameters (the destination struct),
+    // Axis is stMotionStage.Axis, Execute is the request latch bExecute below,
+    // Error goes to this block's bError, and ErrorID is inspected for
+    // nLatchErrId. Busy/Done/Error are the handshake that clears bExecute.
     mcReadParams: MC_ReadParameterSet;
+    // Pacing timer for the refresh (TON, PT := tRefreshDelay in ms): it runs
+    // while bEnable is TRUE and no read is pending, and its Q sets the request
+    // latch. Because its IN is bEnable AND NOT bExecute, it is held reset for
+    // the whole duration of a read, so the delay it measures is the off-time
+    // after a read completes rather than the total period.
     timer: TON;
+    // Request latch for mcReadParams.Execute. Initialised TRUE so that the first
+    // parameter read is issued on the very first scan instead of one
+    // tRefreshDelay later. Set again by timer.Q, reset when the read reports
+    // Done or Error, and inverted into the timer's IN to hold the timer off
+    // while a read is in flight.
     bExecute: BOOL := TRUE;
+    // Placeholder for the NC error id of a failed parameter read: a TwinCAT NC
+    // error code (UDINT, dimensionless - not an engineering value or a count).
+    // Only written as 0 today, whenever mcReadParams.ErrorID is non-zero; no
+    // code ever stores the id itself, so it always reads 0 and carries no
+    // information. Kept as the intended home for a latched read error id.
     nLatchErrId: UDINT;
 END_VAR
 ]]></Declaration>
