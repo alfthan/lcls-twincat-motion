@@ -3,10 +3,16 @@
   <POU Name="FB_WriteCalibrationParameters" Id="{6f8141b3-3a18-4ecd-8d0f-d7b01f6561a0}" SpecialFunc="None">
     <Declaration><![CDATA[// Calibration Param SDO Hybrid Logic (startup-sequential, then on-demand)
 // Sequential trigger (bCalibParamStep statemachine) is used at startup or force, otherwise parallel/on-demand.
+// An SDO error latches nCalibParamStep = ERROR in *both* paths and also sets
+// stMotionStage.bError/nErrorId; the fault stays latched (the restart timer cannot
+// clear it) until bErrorAcknowledge is set, which clears the error and restarts
+// the sequence from IDLE.
 
 FUNCTION_BLOCK FB_WriteCalibrationParameters
 VAR_INPUT
-    bEnable : BOOL;
+    bEnable           : BOOL;
+    // Fault acknowledge: clears a latched ERROR (sequential or parallel path).
+    bErrorAcknowledge : BOOL;
 END_VAR
 VAR_IN_OUT
     stDS402Drive         : ST_DS402Drive;
@@ -39,7 +45,6 @@ VAR
     tonStartUp : TON;
     nCalibParamStep : (IDLE := 0, CALIBOPTS := 1, DONE := 10, ERROR := -1) := IDLE;
     bForceSequentialSDOs : BOOL := FALSE;
-    bErrorAcknowledge: BOOL;
 END_VAR
 
 ]]></Declaration>
@@ -56,8 +61,13 @@ IF bEnable THEN
         PT := T#6S
     );
 
-    // Reset sequence if startup timer hasn't fired and not forcing sequential SDOs
-    IF NOT tonStartUp.Q AND nCalibParamStep <> IDLE AND NOT bForceSequentialSDOs THEN
+    // Reset sequence if startup timer hasn't fired and not forcing sequential SDOs.
+    // A latched ERROR is never reset here: the fault has to outlive the timer so
+    // that bErrorAcknowledge is the only way to clear it.
+    IF NOT tonStartUp.Q
+       AND nCalibParamStep <> IDLE
+       AND nCalibParamStep <> ERROR
+       AND NOT bForceSequentialSDOs THEN
         nCalibParamStep := IDLE;
     END_IF
 
@@ -106,16 +116,25 @@ IF bEnable THEN
         END_CASE
 
     ELSE
-        // Parallel SDO mode — single write
-        fbCalibrationOptWrite.bExecute := stMCS2ChanParameter.nCalibrationOpt <> nRecentCalibrationOpt;
-        IF ftCalibrationOptSetDone.Q THEN
+        // Parallel SDO mode — single write. An SDO error latches the same ERROR
+        // state as the sequential path so bErrorAcknowledge clears it here too;
+        // while the fault is latched no further write is issued.
+        IF nCalibParamStep = ERROR THEN
             fbCalibrationOptWrite.bExecute := FALSE;
-            IF fbCalibrationOptWrite.bError THEN
-                stMotionStage.bError   := fbCalibrationOptWrite.bError;
-                stMotionStage.nErrorId := fbCalibrationOptWrite.nErrId;
-            ELSE
-                nRecentCalibrationOpt  := stMCS2ChanParameter.nCalibrationOpt;
-                bCalibrationsParamsSet := TRUE;
+            bCalibrationsParamsSet         := FALSE;
+        ELSE
+            fbCalibrationOptWrite.bExecute := stMCS2ChanParameter.nCalibrationOpt <> nRecentCalibrationOpt;
+            IF ftCalibrationOptSetDone.Q THEN
+                fbCalibrationOptWrite.bExecute := FALSE;
+                IF fbCalibrationOptWrite.bError THEN
+                    stMotionStage.bError   := fbCalibrationOptWrite.bError;
+                    stMotionStage.nErrorId := fbCalibrationOptWrite.nErrId;
+                    nCalibParamStep        := ERROR;
+                    bCalibrationsParamsSet := FALSE;
+                ELSE
+                    nRecentCalibrationOpt  := stMCS2ChanParameter.nCalibrationOpt;
+                    bCalibrationsParamsSet := TRUE;
+                END_IF
             END_IF
         END_IF
     END_IF
