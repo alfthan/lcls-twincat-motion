@@ -88,6 +88,8 @@ fbMotionReadPMPSDB(
 
 bEnable := stPMPSEpicsToPlc.bArbiterEnabled AND bEnableBeamParams;
 rtEnable(CLK:=bEnable);
+// bMoveOnArbiterTimeout is deliberately left at its FALSE default here: an arbiter
+// timeout must never authorize a move on its own, we wait for the arbiter instead.
 fbMotionBPTM(
     astMotionStage:=astMotionStageMax,
     fbArbiter:=fbArbiter,

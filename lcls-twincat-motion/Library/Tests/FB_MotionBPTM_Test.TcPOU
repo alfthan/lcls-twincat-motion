@@ -38,6 +38,8 @@ TestInit();
 Test3dMove();
 TestNoMove();
 TestCount();
+TestTimeoutNoAuth();
+TestTimeoutOptIn();
 
 ]]></ST>
     </Implementation>
@@ -439,6 +441,155 @@ fbSubSysIO(
     LA:=fbArbiter,
     FFO:=fbFFHWO,
 );]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="TestTimeoutNoAuth" Id="{f59e65c3-6e43-4f93-940f-01fc00f2f0ff}">
+      <Declaration><![CDATA[METHOD TestTimeoutNoAuth
+(*
+    An arbiter timeout must not authorize a move on its own.
+    bMoveOnArbiterTimeout defaults to FALSE, so this caller does not opt in to
+    timeout-authorized motion and the BPTM must keep waiting for the arbiter no
+    matter how long the arbiter takes to answer.
+    No arbiter IO is serviced here, so the transition request is never granted
+    and the arbiter timeout elapses during the test.
+*)
+VAR_INST
+    fbBptm: FB_MotionBPTM;
+    fbArbiter: FB_Arbiter(2);
+    fbFFHWO: FB_HardwareFFOutput := (bAutoReset := TRUE);
+    // Local motors: keep this test off the shared astMotionStage of the other tests
+    astMotionStageLocal: ARRAY[1..MotionConstants.MAX_STATE_MOTORS] OF ST_MotionStage;
+
+    nState: UINT;
+    tonTest: TON;
+    tonWait: TON;
+END_VAR
+]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[
+TEST('TestTimeoutNoAuth');
+
+// Fail the test if the sequence somehow takes too long
+tonTest(IN:=TRUE, PT:=T#5s);
+IF tonTest.Q THEN
+    nState := 3;
+END_IF
+
+CASE nState OF
+    0:
+        // Request a move without granting the timeout motion permit
+        fbBptm(
+            astMotionStage:=astMotionStageLocal,
+            fbArbiter:=fbArbiter,
+            fbFFHWO:=fbFFHWO,
+            stGoalParams:=stGoal2,
+            stTransParams:=stTrans,
+            nActiveMotorCount:=3,
+            bEnable:=TRUE,
+            bAtState:=FALSE,
+            tArbiterTimeout:=T#100ms,
+        );
+        nState := 1;
+    1:
+        fbBptm(
+            astMotionStage:=astMotionStageLocal,
+            fbArbiter:=fbArbiter,
+            fbFFHWO:=fbFFHWO,
+            stGoalParams:=stGoal2,
+            stTransParams:=stTrans,
+            nActiveMotorCount:=3,
+            bEnable:=TRUE,
+            bAtState:=FALSE,
+            tArbiterTimeout:=T#100ms,
+        );
+        // Let the arbiter timeout elapse with plenty of margin
+        tonWait(IN:=TRUE, PT:=T#500ms);
+        IF tonWait.Q OR fbBptm.bTransitionAuthorized THEN
+            nState := 2;
+        END_IF
+    2:
+        // We must never be authorized to move by the timeout alone
+        AssertFalse(
+            fbBptm.bTransitionAuthorized,
+            'Arbiter timeout authorized a move without an explicit opt-in',
+        );
+        TEST_FINISHED();
+    3:
+        AssertFalse(
+            tonTest.Q,
+            'Timeout in test',
+        );
+        TEST_FINISHED();
+END_CASE
+]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="TestTimeoutOptIn" Id="{0d5178d7-6663-4fa9-a9c8-c4ef223e293f}">
+      <Declaration><![CDATA[METHOD TestTimeoutOptIn
+(*
+    A caller may deliberately opt in to timeout-authorized motion by setting
+    bMoveOnArbiterTimeout to TRUE. If the arbiter does not answer in time, the
+    BPTM then authorizes the move (and trips the beam for it).
+    No arbiter IO is serviced here, so the transition request is never granted
+    and the arbiter timeout elapses during the test.
+*)
+VAR_INST
+    fbBptm: FB_MotionBPTM;
+    fbArbiter: FB_Arbiter(2);
+    fbFFHWO: FB_HardwareFFOutput := (bAutoReset := TRUE);
+    // Local motors: keep this test off the shared astMotionStage of the other tests
+    astMotionStageLocal: ARRAY[1..MotionConstants.MAX_STATE_MOTORS] OF ST_MotionStage;
+
+    nState: UINT;
+    tonWait: TON;
+END_VAR
+]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[
+TEST('TestTimeoutOptIn');
+
+CASE nState OF
+    0:
+        // Request a move with the timeout motion permit deliberately enabled
+        fbBptm(
+            astMotionStage:=astMotionStageLocal,
+            fbArbiter:=fbArbiter,
+            fbFFHWO:=fbFFHWO,
+            stGoalParams:=stGoal2,
+            stTransParams:=stTrans,
+            nActiveMotorCount:=3,
+            bEnable:=TRUE,
+            bAtState:=FALSE,
+            tArbiterTimeout:=T#100ms,
+            bMoveOnArbiterTimeout:=TRUE,
+        );
+        nState := 1;
+    1:
+        fbBptm(
+            astMotionStage:=astMotionStageLocal,
+            fbArbiter:=fbArbiter,
+            fbFFHWO:=fbFFHWO,
+            stGoalParams:=stGoal2,
+            stTransParams:=stTrans,
+            nActiveMotorCount:=3,
+            bEnable:=TRUE,
+            bAtState:=FALSE,
+            tArbiterTimeout:=T#100ms,
+            bMoveOnArbiterTimeout:=TRUE,
+        );
+        // The timeout must authorize the move within this window
+        tonWait(IN:=TRUE, PT:=T#1s);
+        IF fbBptm.bTransitionAuthorized OR tonWait.Q THEN
+            nState := 2;
+        END_IF
+    2:
+        AssertTrue(
+            fbBptm.bTransitionAuthorized,
+            'Explicit opt-in did not authorize the move on arbiter timeout',
+        );
+        TEST_FINISHED();
+END_CASE
+]]></ST>
       </Implementation>
     </Method>
   </POU>

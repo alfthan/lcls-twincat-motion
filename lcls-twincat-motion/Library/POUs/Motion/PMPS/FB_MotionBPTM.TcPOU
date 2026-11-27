@@ -32,8 +32,11 @@ VAR_INPUT
     sDeviceName: STRING;
     // How long to wait for parameters before timing out
     tArbiterTimeout: TIME := T#1s;
-    // Whether to fault and move on timeout (TRUE) or to wait (FALSE)
-    bMoveOnArbiterTimeout: BOOL := TRUE;
+    // Safety permit for timeout-authorized motion: TRUE trips the beam and moves anyway
+    // when the arbiter does not answer in time, FALSE keeps waiting for the arbiter.
+    // Defaults to FALSE so an unwired caller is never authorized to move by a timeout.
+    // Set TRUE deliberately to opt in to moving on an arbiter timeout.
+    bMoveOnArbiterTimeout: BOOL := FALSE;
     // Set to TRUE when it is safe to reset the BPTM timeout fast fault, to reset it early.
     bResetBPTMTimeout: BOOL;
     // Set to TRUE to make the BPTM retry

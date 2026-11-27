@@ -24,7 +24,9 @@ VAR_INPUT
     getState: INT;
     fStateBoundaryDeadband: LREAL := 0;
     tArbiterTimeout: TIME := T#1s;
-    bMoveOnArbiterTimeout: BOOL := TRUE;
+    // Safety permit for timeout-authorized motion, defaults to FALSE (wait for the arbiter).
+    // Set TRUE deliberately to allow a move after an arbiter timeout.
+    bMoveOnArbiterTimeout: BOOL := FALSE;
 END_VAR
 VAR_OUTPUT
     bTransitionAuthorized: BOOL;
