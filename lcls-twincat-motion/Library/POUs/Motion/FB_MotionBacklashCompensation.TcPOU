@@ -3,26 +3,65 @@
   <POU Name="FB_MotionBacklashCompensation" Id="{8a5f8930-cc79-4651-8951-8645e0708394}" SpecialFunc="None">
     <Declaration><![CDATA[FUNCTION_BLOCK FB_MotionBacklashCompensation
 (*
-    Handle positive/negative backlash compensation
-    User needs to set the direction of backlash from the sign of the compensation value
-    Backlash compensation is disabled during referencing (homing).
-    When direction is positive/negative, further movement in the negative/positive direction not compensated
-    further movement in the negative/positive direction will be compensated
+    FB_MotionBacklashCompensation
+
+    Purpose:
+        Apply positive/negative backlash compensation to a motion stage: on a
+        direction reversal the axis is driven an extra amount (stMotionStage.fBacklash)
+        so the mechanical play of the stage is taken up before the real move, and the
+        commanded position is always approached from the same side.
+
+    Usage:
+        Call once per cycle with the ST_MotionStage instance that is being moved and
+        drive bHoming/bMoving from the stage execute command (FB_MotionStage does this
+        for you). The NC axis must have "position correction" enabled in its axis
+        parameter set, otherwise MC_BacklashCompensation cannot apply a correction.
+
+    Objectives:
+        - Compensate in one direction only, chosen by the sign of fBacklash, so a
+          reversal is compensated once and repeated moves are not over-compensated.
+        - Never compensate while referencing (homing) nor on the first move after
+          homing, and re-register the value whenever the user changes fBacklash.
+        - Publish MC_BacklashCompensation faults to the caller via bError/nErrorID.
+
+    Units:
+        Motion values are in the engineering units (EGU) of the NC axis scaling:
+        fBacklash, fCurrentBacklash and fPosition are EGU, fVelocity is EGU/s.
+
+    History:
+        2025-01-31  Y. S. Mandza     Initial backlash compensation support, EPICS PVs
+                                     and validation test.
+        2025-03-18  Y. S. Mandza     Added further axes to the validation test.
+        2026-11-27  taio-generic-0   Documented the header and every declaration
+                                     (audit finding #173); no functional change.
 *)
 VAR_IN_OUT
+    // The motion stage to compensate: reads Axis, fBacklash (EGU), bUserBacklashEn and
+    // fVelocity (EGU/s), and writes bBacklashStatus and fCurrentBacklash (EGU).
     stMotionStage: ST_MotionStage;
 END_VAR
 VAR_INPUT
+    // TRUE while the stage is referencing (homing): resets the compensation enable
+    // latch so nothing is compensated during homing or on the first move afterwards.
     bHoming: BOOL;
+    // TRUE while the stage is commanded to move: sets the compensation enable latch so
+    // the correction is applied on the next direction reversal.
     bMoving: BOOL;
 END_VAR
 VAR_OUTPUT
+    // TRUE while MC_BacklashCompensation reports an error; latched until the axis is reset.
     bError: BOOL;
+    // TwinCAT axis error ID of the last compensation error; 0 while bError is FALSE.
     nErrorID: UDINT;
 END_VAR
 VAR
+    // TwinCAT block that performs the compensation move on the axis.
     fbBacklashCompensation: MC_BacklashCompensation;
+    // fBacklash seen on the previous cycle (EGU), used to detect a user change of the
+    // compensation value so the MC block can register the new value.
     fPrevCompensation : LREAL := 0.0;
+    // Internal enable latch of the compensation: set by bMoving, reset by bHoming or by a
+    // change of fBacklash. Gated with bUserBacklashEn before it reaches the MC block.
     bBacklashCompEnable: BOOL;
 END_VAR]]></Declaration>
     <Implementation>
