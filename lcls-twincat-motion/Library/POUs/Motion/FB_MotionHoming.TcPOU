@@ -2,11 +2,37 @@
 <TcPlcObject Version="1.1.0.1">
   <POU Name="FB_MotionHoming" Id="{89795143-e01c-4e96-8d50-67b6176895fe}" SpecialFunc="None">
     <Declaration><![CDATA[FUNCTION_BLOCK FB_MotionHoming
+(*
+    Home a stage using the homing mode selected in stMotionStage.nHomingMode (E_EpicsHomeCmd).
+
+    Usage:
+        Call this every cycle from the motion task while bExecute is TRUE. bBusy is TRUE while a
+        sequence is running, bDone is set once the home position has been written and bError is
+        latched on failure until bExecute is dropped.
+
+    Objectives:
+        - Search for the home signal or the end of travel, sync off the signal and set
+          fHomePosition, implemented as an explicit non-blocking state machine.
+        - Bound every wait of the sequence with a watchdog, so that a stalled jog, a jog that
+          never reports completion or an axis that never comes to a standstill raises an explicit
+          fault (E_LCLSMotionError.HOMING_TIMEOUT) instead of waiting indefinitely.
+
+    History:
+        Initial version: unknown.
+        2026-11-27, agent: bound the CHECK_FWD/CHECK_BWD/FINAL_MOVE jog waits and the WAIT_STOP
+            wait with TON watchdogs; on expiry the jog is stopped and the block faults out.
+*)
 VAR_IN_OUT
     stMotionStage: ST_MotionStage;
 END_VAR
 VAR_INPUT
     bExecute: BOOL;
+    // Maximum time to wait for a search jog (CHECK_FWD, CHECK_BWD) or for the final sync move
+    // (FINAL_MOVE) to end. Raise this for stages with a long travel or a slow search velocity.
+    tJogTimeout: TIME := T#10MIN;
+    // Maximum time to wait for the axis to report standstill in WAIT_STOP.
+    // Must cover the axis deceleration time.
+    tStopTimeout: TIME := T#30S;
 END_VAR
 VAR_OUTPUT
     bBusy: BOOL;
@@ -27,6 +53,14 @@ VAR
     bMove: BOOL;
     nErrCount: INT;
     bInterrupted: BOOL;
+    // Watchdogs on the waiting states. Each timer is enabled only while its state is active, so
+    // it starts counting when the state is entered and restarts when the state is re-entered.
+    tonJogTimeout: TON;
+    tonStopTimeout: TON;
+    // TRUE while the state machine is in a state that waits for a jog to end
+    bWaitingOnJog: BOOL;
+    // TRUE once a watchdog expired. Latched so that the ERROR state can report the explicit fault.
+    bTimeout: BOOL;
 END_VAR
 VAR CONSTANT
     IDLE: INT := 0;
@@ -118,6 +152,7 @@ IF bMove THEN
                 bError := FALSE;
                 nErrorID := 0;
                 bInterrupted := FALSE;
+                bTimeout := FALSE;
             END_IF
         // Figure out whether to move forward, move backward, or give up
         NEXT_MOVE:
@@ -240,13 +275,20 @@ IF bMove THEN
             bDone := TRUE;
         ERROR:
             bError := TRUE;
-            nErrorID := fbJog.ErrorID;
+            IF bTimeout THEN
+                // A watchdog expired: report our own fault instead of the jog's (empty) error id
+                nErrorID := E_LCLSMotionError.HOMING_TIMEOUT;
+            ELSE
+                nErrorID := fbJog.ErrorID;
+            END_IF
             nHomeStateMachine := FINAL_SETPOS;
             fbSetPos(
                 Axis:=stMotionStage.Axis,
                 Execute:=FALSE);
             IF bInterrupted THEN
                 stMotionStage.sCustomErrorMessage := 'Homing interrupted';
+            ELSIF bTimeout THEN
+                stMotionStage.sCustomErrorMessage := 'Homing timeout, jog did not complete';
             ELSE
                 stMotionStage.sCustomErrorMessage := 'Homing failure';
             END_IF
@@ -255,6 +297,30 @@ IF bMove THEN
                 nHomeStateMachine := nStateAfterStop;
             END_IF
     END_CASE
+
+    // Bound every wait of the sequence with a watchdog
+    bWaitingOnJog := (nHomeStateMachine = CHECK_FWD)
+                  OR (nHomeStateMachine = CHECK_BWD)
+                  OR (nHomeStateMachine = FINAL_MOVE);
+    tonJogTimeout(
+        IN := bWaitingOnJog,
+        PT := tJogTimeout);
+    tonStopTimeout(
+        IN := (nHomeStateMachine = WAIT_STOP),
+        PT := tStopTimeout);
+    // Latch the expiry so that the ERROR state can report it on the following cycle
+    bTimeout S= tonJogTimeout.Q OR tonStopTimeout.Q;
+
+    // A stalled jog, a jog that never completes or an axis that never stops must fault instead of
+    // blocking this function block forever
+    IF bTimeout AND (bWaitingOnJog OR (nHomeStateMachine = WAIT_STOP)) THEN
+        // Stop the jog before faulting out, then let the ERROR state record the failure
+        fbJog(
+            Axis:=stMotionStage.Axis,
+            JogForward:=FALSE,
+            JogBackwards:=FALSE);
+        nHomeStateMachine := ERROR;
+    END_IF
 END_IF]]></ST>
     </Implementation>
   </POU>

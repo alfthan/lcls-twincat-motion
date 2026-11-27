@@ -9,6 +9,9 @@ TYPE E_LCLSMotionError :
     UNSAFE := 16#7901,
     INVALID := 16#7902,
     MCS2_FAULT := 16#7903,
+    // Homing did not finish inside its watchdog timeout: the search jog, the final move or the
+    // stop was still pending when the timer expired
+    HOMING_TIMEOUT := 16#7904,
     TEST := 16#FFFF
 ) UDINT;
 END_TYPE
