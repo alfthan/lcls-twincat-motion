@@ -3,11 +3,19 @@
   <POU Name="FB_PerMotorFFOND_Test" Id="{e88b9963-261b-47d2-82dd-2fce2cf61cac}" SpecialFunc="None">
     <Declaration><![CDATA[FUNCTION_BLOCK FB_PerMotorFFOND_Test EXTENDS TcUnit.FB_TestSuite
 (*
+    Unit tests for FB_PerMotorFFOND.
+
+    Fast faults covered:
     FFO if an illogical motor count is passed
     FFO if any motor has what looks like an encoder error
        - We'll just simulate this without doing it legit
        - The legit test is done elsewhere
     More FFOs may be added later and these will need to be tested too
+
+    Both tests step the fast fault block and the hardware fast fault output
+    through several PLC cycles, so the fast fault final state, the hold while
+    the stimulus is still present and the auto reset after the stimulus is
+    gone are covered, not only the first cycle after the stimulus.
 *)
 VAR
 END_VAR
@@ -25,29 +33,54 @@ VAR_INST
     astMotionStage: ARRAY[1..MotionConstants.MAX_STATE_MOTORS] OF ST_MotionStage;
     fbFFHWO: FB_HardwareFFOutput := (bAutoReset := TRUE);
 END_VAR
+VAR
+    nIter: UINT;
+END_VAR
 ]]></Declaration>
       <Implementation>
         <ST><![CDATA[
 TEST('TestBlankCount');
 
+// q_xFastFaultOut is TRUE when the beam is permitted and FALSE on a fast fault.
+// Baseline: one cycle before the fast fault block is called, nothing can fault.
 fbFFHWO.EvaluateOutput();
 AssertTrue(
     fbFFHWO.q_xFastFaultOut,
     'Started with a fault',
 );
+
+// Cycle 1: a blank motor count is a programmer error and has to fault right away.
 fbFFO(
     astMotionStage:=astMotionStage,
     fbFFHWO:=fbFFHWO,
 );
 fbFFHWO.EvaluateOutput();
-AssertFalse(
-    fbFFHWO.q_xFastFaultOut,
-    'Blank count did not fault',
-);
 AssertTrue(
     fbFFO.bMotorCountError,
     'Blank count did not error',
 );
+AssertFalse(
+    fbFFHWO.q_xFastFaultOut,
+    'Blank count did not fault',
+);
+
+// Cycles 2 to 4: the count error latches, so the fault has to hold on every
+// following cycle instead of clearing while the motor count is still blank.
+FOR nIter := 1 TO 3 DO
+    fbFFO(
+        astMotionStage:=astMotionStage,
+        fbFFHWO:=fbFFHWO,
+    );
+    fbFFHWO.EvaluateOutput();
+    AssertTrue(
+        fbFFO.bMotorCountError,
+        'Blank count error cleared without being reset',
+    );
+    AssertFalse(
+        fbFFHWO.q_xFastFaultOut,
+        'Blank count fault cleared while the count was still blank',
+    );
+END_FOR
 
 TEST_FINISHED();]]></ST>
       </Implementation>
@@ -59,16 +92,24 @@ VAR_INST
     astMotionStage: ARRAY[1..MotionConstants.MAX_STATE_MOTORS] OF ST_MotionStage;
     fbFFHWO: FB_HardwareFFOutput := (bAutoReset := TRUE);
 END_VAR
+VAR
+    nIter: UINT;
+END_VAR
 ]]></Declaration>
       <Implementation>
         <ST><![CDATA[
 TEST('TestTwoMotorEncError');
 
+// q_xFastFaultOut is TRUE when the beam is permitted and FALSE on a fast fault.
+// Baseline: one cycle before the fast fault block is called, nothing can fault.
 fbFFHWO.EvaluateOutput();
 AssertTrue(
     fbFFHWO.q_xFastFaultOut,
     'Started with a fault',
 );
+
+// Cycle 1: motor 2 reports an encoder error, motor 1 stays healthy.
+// Only the motor with the encoder error may trip.
 astMotionStage[2].bError := TRUE;
 astMotionStage[2].nErrorId := 16#4467; // Invalid encoder position data
 fbFFO(
@@ -78,8 +119,59 @@ fbFFO(
 );
 fbFFHWO.EvaluateOutput();
 AssertFalse(
+    fbFFO.bMotorCountError,
+    'Two motor count rejected as invalid',
+);
+AssertTrue(
+    fbFFO.afbEncError[2].bTripped,
+    'Encoder error motor did not trip its fast fault',
+);
+AssertFalse(
+    fbFFO.afbEncError[1].bTripped,
+    'Healthy motor tripped its fast fault',
+);
+AssertFalse(
     fbFFHWO.q_xFastFaultOut,
     'Encoder error did not fault',
+);
+
+// Cycles 2 to 4: the fault has to hold for as long as the encoder error is there.
+FOR nIter := 1 TO 3 DO
+    fbFFO(
+        astMotionStage:=astMotionStage,
+        fbFFHWO:=fbFFHWO,
+        nActiveMotorCount:=2,
+    );
+    fbFFHWO.EvaluateOutput();
+    AssertTrue(
+        fbFFO.afbEncError[2].bTripped,
+        'Encoder error fast fault cleared while the encoder error was still present',
+    );
+    AssertFalse(
+        fbFFHWO.q_xFastFaultOut,
+        'Fast fault output cleared while the encoder error was still present',
+    );
+END_FOR
+
+// Cycles 5 and 6: the auto resetting fast fault has to permit the beam again
+// once the encoder error is gone.
+astMotionStage[2].bError := FALSE;
+astMotionStage[2].nErrorId := 0;
+FOR nIter := 1 TO 2 DO
+    fbFFO(
+        astMotionStage:=astMotionStage,
+        fbFFHWO:=fbFFHWO,
+        nActiveMotorCount:=2,
+    );
+    fbFFHWO.EvaluateOutput();
+END_FOR
+AssertFalse(
+    fbFFO.afbEncError[2].bTripped,
+    'Encoder error fast fault stayed tripped after the encoder error cleared',
+);
+AssertTrue(
+    fbFFHWO.q_xFastFaultOut,
+    'Fast fault output did not re-permit the beam after the encoder error cleared',
 );
 
 TEST_FINISHED();]]></ST>
