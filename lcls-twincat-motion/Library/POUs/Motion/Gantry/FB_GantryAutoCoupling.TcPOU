@@ -38,7 +38,11 @@ gantry_diff_limit(Penc:=MasterEnc, SEnc:=SlaveEnc, GantDiffTol:=Master.nGantryTo
                   SLimFwd=>Slave.bGantryForwardEnable, SLimBwd=>Slave.bGantryBackwardEnable);
 
 // Coupling Status Bit
-bGantryAlreadyCoupled := Master.Axis.NcToPlc.CoupleState=1 AND Slave.Axis.NcToPlc.CoupleState=3;
+// A gantry is coupled when the master axis reports the NC master coupling state
+// and the slave axis reports the NC slave coupling state. The state values are
+// vendor-defined and named in NCAxisConstants rather than compared as literals.
+bGantryAlreadyCoupled := Master.Axis.NcToPlc.CoupleState=NCAxisConstants.NC_COUPLE_STATE_MASTER
+                         AND Slave.Axis.NcToPlc.CoupleState=NCAxisConstants.NC_COUPLE_STATE_SLAVE;
 
 fbSetEnables(stMotionStage:=Master);
 fbSetEnables(stMotionStage:=Slave);

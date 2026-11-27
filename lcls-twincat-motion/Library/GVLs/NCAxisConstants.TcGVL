@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <GVL Name="NCAxisConstants" Id="{8cb0d432-7521-4a86-988b-2f64cc42bd21}">
+    <Declaration><![CDATA[{attribute 'qualified_only'}
+(*
+    Global NC (Numerical Control) Axis State Constants
+
+    The TwinCAT NC reports axis state values that the vendor defines, not this
+    project. They are declared here once so that logic inspecting an axis state
+    does not compare against bare literals: if the mapping is misread, or the
+    NC renumbers a state, the correction is a single edit here instead of a
+    search through every block that compares the value.
+
+    Coupling states, as reported by NCTOPLC_AXIS_REF.CoupleState:
+    0: axis is a single axis (not coupled)
+    1: axis is a master axis
+    2: axis is master and slave
+    3: axis is a slave axis
+*)
+VAR_GLOBAL CONSTANT
+    // The axis is a single axis (not coupled to any other axis).
+    NC_COUPLE_STATE_SINGLE: UDINT := 0;
+    // The axis is the master of a coupling.
+    NC_COUPLE_STATE_MASTER: UDINT := 1;
+    // The axis is both master and slave of a coupling (chained gantry).
+    NC_COUPLE_STATE_MASTER_SLAVE: UDINT := 2;
+    // The axis is the slave of a coupling.
+    NC_COUPLE_STATE_SLAVE: UDINT := 3;
+END_VAR]]></Declaration>
+  </GVL>
+</TcPlcObject>
