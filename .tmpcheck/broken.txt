@@ -1,0 +1,91 @@
+Failed to parse /app/namespaces/d6f73763-31bc-4bea-8f49-b5906058e129/lcls-twincat-motion/.tmpcheck/FB_Broken.TcPOU FB_MotionStageSetHelper/implementation: Exception: UnexpectedCharacters: No terminal matches ';' in the current parser context, at line 137 col 20
+
+    bSetPosExec := ;;; nonsense (
+                   ^
+Expected one of: 
+	* TRUE_VALUE
+	* BIT_STRING_TYPE_NAME
+	* T
+	* LT
+	* SINGLE_BYTE_CHARACTER_STRING
+	* SIGNED_INTEGER
+	* INTEGER_TYPE_NAME
+	* LTIME
+	* TIME
+	* FALSE_VALUE
+	* IDENTIFIER
+	* REAL_TYPE_NAME
+	* TOD
+	* TIME_OF_DAY
+	* __ANON_1
+	* DATE_AND_TIME
+	* LPAR
+	* __ANON_6
+	* PERCENT
+	* UNARY_OPERATOR
+	* INTEGER
+	* __ANON_0
+	* DT
+	* __ANON_5
+	* DOUBLE_BYTE_CHARACTER_STRING
+	* __ANON_4
+	* __ANON_3
+	* __ANON_2
+	* DATE
+	* D
+	* __ANON_7
+
+Traceback (most recent call last):
+  File "/home/agent/.local/bin/blark", line 8, in <module>
+    sys.exit(main())
+             ^^^^^^
+  File "/home/agent/.local/lib/python3.12/site-packages/blark/main.py", line 96, in main
+    func(**kwargs)
+  File "/home/agent/.local/lib/python3.12/site-packages/blark/parse.py", line 533, in main
+    summarized = summarize(all_results)
+                 ^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/agent/.local/lib/python3.12/site-packages/blark/parse.py", line 383, in summarize
+    return CodeSummary.from_parse_results(parsed, squash=squash)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/agent/.local/lib/python3.12/site-packages/blark/summary.py", line 1267, in from_parse_results
+    transformed = parsed.transform()
+                  ^^^^^^^^^^^^^^^^^^
+  File "/home/agent/.local/lib/python3.12/site-packages/blark/parse.py", line 115, in transform
+    raise ValueError(
+ValueError: Source code was not successfully parsed; cannot transform. Exception was UnexpectedCharacters: No terminal matches ';' in the current parser context, at line 137 col 20
+
+    bSetPosExec := ;;; nonsense (
+                   ^
+Expected one of: 
+	* TRUE_VALUE
+	* BIT_STRING_TYPE_NAME
+	* T
+	* LT
+	* SINGLE_BYTE_CHARACTER_STRING
+	* SIGNED_INTEGER
+	* INTEGER_TYPE_NAME
+	* LTIME
+	* TIME
+	* FALSE_VALUE
+	* IDENTIFIER
+	* REAL_TYPE_NAME
+	* TOD
+	* TIME_OF_DAY
+	* __ANON_1
+	* DATE_AND_TIME
+	* LPAR
+	* __ANON_6
+	* PERCENT
+	* UNARY_OPERATOR
+	* INTEGER
+	* __ANON_0
+	* DT
+	* __ANON_5
+	* DOUBLE_BYTE_CHARACTER_STRING
+	* __ANON_4
+	* __ANON_3
+	* __ANON_2
+	* DATE
+	* D
+	* __ANON_7
+

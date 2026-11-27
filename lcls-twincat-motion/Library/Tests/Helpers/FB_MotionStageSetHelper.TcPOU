@@ -2,11 +2,29 @@
 <TcPlcObject Version="1.1.0.1">
   <POU Name="FB_MotionStageSetHelper" Id="{a6e3baa8-89ca-4587-9e8c-708eb7f80452}" SpecialFunc="None">
     <Declaration><![CDATA[FUNCTION_BLOCK FB_MotionStageSetHelper
+(*
+    Set an stMotionStage to a known start position, with the drive deactivated.
+
+    On the rising edge of bExecute the stage is reset, the drive is disabled, and
+    MC_SetPosition is used to place the axis readback at fStartPosition.
+    bSetDone goes to TRUE once the axis actual position matches fStartPosition.
+
+    The wait for the set position to complete is bounded by tTimeout. If the wait
+    expires, or if MC_SetPosition reports an error, the attempt counts as failed:
+    bError latches, the stage is given an explicit fault message, the
+    MC_SetPosition command is cleared, and no further commands are issued.
+    bError clears on the next rising edge of bExecute.
+
+    The motion stage should have its own FB_MotionStage or some stand-in for it
+    running on outside of the FB.
+*)
 VAR_INPUT
     // Begin on rising edge, stop on falling edge.
     bExecute: BOOL;
     // The position to set the motor to
     fStartPosition: LREAL;
+    // Maximum time to wait for the set position to complete before raising a fault.
+    tTimeout: TIME := T#10s;
 END_VAR
 VAR_IN_OUT
     stMotionStage: ST_MotionStage;
@@ -16,27 +34,60 @@ VAR_OUTPUT
     bResetDone: BOOL;
     // Goes to TRUE once the set position completes.
     bSetDone: BOOL;
+    // Goes to TRUE and latches if the set position fails or times out.
+    bError: BOOL;
+    // Error code if nonzero
+    nErrorId: UDINT;
+    // Message to identify the error state
+    sErrorMessage: STRING;
+    // Counts up while waiting for the set position. Can be used to implement a timeout.
+    tElapsed: TIME;
 END_VAR
 VAR
     rtExec: R_TRIG;
+    // Catches mcSetPos.Error, which can fall again before we evaluate it
+    rtSetPosError: R_TRIG;
     mcSetPos: MC_SetPosition;
     stSetPositionOptions : ST_SetPositionOptions;
+    // Bounds the wait for the set position, so a stuck axis faults instead of hanging
+    tonTimeout: TON;
+    // mcSetPos command state
+    bSetPosExec: BOOL;
+    bSetPosDone: BOOL;
+    // Latched mcSetPos done, so we do not re-command while we wait for the readback
+    bSetPosDoneLatch: BOOL;
+    // Latched mcSetPos failure and error code
+    bSetPosFailed: BOOL;
+    nLatchErrorId: UDINT;
 END_VAR
 ]]></Declaration>
     <Implementation>
-      <ST><![CDATA[
-rtExec(CLK:=bExecute);
+      <ST><![CDATA[rtExec(CLK:=bExecute);
 
+// Start of a new attempt: clear the latched state, deactivate the drive, and
+// make sure we are not holding on to a stale set position command.
 IF rtExec.Q THEN
     stMotionStage.bReset := TRUE;
     stMotionStage.bEnable := FALSE;
     stMotionStage.nEnableMode := E_StageEnableMode.NEVER;
-    mcSetPos(
-        Axis:=stMotionStage.Axis,
-        Execute:=FALSE
-    );
+    stMotionStage.sCustomErrorMessage := '';
+    stSetPositionOptions.ClearPositionLag := TRUE;
+    bSetPosExec := FALSE;
+    bSetPosDoneLatch := FALSE;
+    bSetPosFailed := FALSE;
+    nLatchErrorId := 0;
     bResetDone := FALSE;
     bSetDone := FALSE;
+    bError := FALSE;
+    nErrorId := 0;
+    sErrorMessage := '';
+END_IF
+
+// Latch mcSetPos failures: the Error output can fall again before we look at it.
+rtSetPosError(CLK:=mcSetPos.Error);
+IF rtSetPosError.Q THEN
+    bSetPosFailed := TRUE;
+    nLatchErrorId := mcSetPos.ErrorID;
 END_IF
 
 bResetDone := NOT stMotionStage.bError AND NOT stMotionStage.bBusy;
@@ -45,23 +96,89 @@ IF bResetDone THEN
     stMotionStage.bReset := FALSE;
 END_IF
 
-IF NOT bSetDone THEN
+// The wait for the set position to complete is bounded: if the axis readback
+// never matches fStartPosition we fault instead of waiting forever.
+tonTimeout(
+    IN:=bExecute AND bResetDone AND NOT bSetDone AND NOT bError,
+    PT:=tTimeout,
+    ET=>tElapsed
+);
+
+IF bExecute AND bResetDone AND NOT bSetDone AND NOT bError THEN
+    // The position can only be set with the drive deactivated.
     stMotionStage.bEnable := FALSE;
-    IF stMotionStage.Axis.NcToPlc.ActPos <> fStartPosition THEN
-        stSetPositionOptions.ClearPositionLag := TRUE;
-        mcSetPos(
-            Axis:=stMotionStage.Axis,
-            Execute:=NOT mcSetPos.Execute,
-            Position:=fStartPosition,
-            Mode:=FALSE,
-            Options:=stSetPositionOptions,
-            Done=>
-        );
-    ELSE
+    IF stMotionStage.Axis.NcToPlc.ActPos = fStartPosition THEN
+        // The axis readback already matches the requested position.
         bSetDone := TRUE;
+        bSetPosExec := FALSE;
+    ELSIF tonTimeout.Q THEN
+        // The wait expired: count the attempt as failed, raise a fault with an
+        // explicit message, and clear the command so we stop retrying.
+        RaiseFault(
+            nFaultId:=E_LCLSMotionError.TIMEOUT,
+            sFaultMessage:=CONCAT('Timed out setting position to ', LREAL_TO_STRING(fStartPosition))
+        );
+        bSetPosExec := FALSE;
+    ELSIF bSetPosFailed THEN
+        // MC_SetPosition reported a failure: raise a fault with the command's own
+        // error code and an explicit message, and clear the command.
+        RaiseFault(
+            nFaultId:=nLatchErrorId,
+            sFaultMessage:=CONCAT('MC_SetPosition failed setting position to ', LREAL_TO_STRING(fStartPosition))
+        );
+        bSetPosExec := FALSE;
+    ELSE
+        // Command the set position, and stop re-commanding once the NC reports
+        // done; the matching readback is still bounded by tTimeout.
+        bSetPosExec := NOT bSetPosDoneLatch;
     END_IF
+ELSE
+    // Idle, done, or faulted: never leave a stale command behind.
+    bSetPosExec := FALSE;
+END_IF
+
+mcSetPos(
+    Axis:=stMotionStage.Axis,
+    Execute:=bSetPosExec,
+    Position:=fStartPosition,
+    Mode:=FALSE,
+    Options:=stSetPositionOptions,
+    Done=>bSetPosDone
+);
+
+IF bSetPosDone THEN
+    bSetPosDoneLatch := TRUE;
 END_IF
 ]]></ST>
     </Implementation>
+    <Method Name="RaiseFault" Id="{08ea0153-bbd8-4c47-81ca-9ca709a27456}">
+      <Declaration><![CDATA[METHOD PRIVATE RaiseFault
+(*
+    Count the set position attempt as failed.
+
+    Latches the failure on this block and raises a fault with an explicit message
+    on the motion stage, so the fault reaches the shared logger through
+    FB_MotionStage/FB_LogMotionError and is latched until bExecute rises again.
+*)
+VAR_INPUT
+    // Error code to report
+    nFaultId: UDINT;
+    // Explicit message to report
+    sFaultMessage: STRING;
+END_VAR
+]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[bError := TRUE;
+nErrorId := nFaultId;
+nLatchErrorId := nFaultId;
+sErrorMessage := sFaultMessage;
+
+// Raise the fault on the motion stage
+stMotionStage.nErrorId := nFaultId;
+stMotionStage.sCustomErrorMessage := sFaultMessage;
+stMotionStage.bError := TRUE;
+]]></ST>
+      </Implementation>
+    </Method>
   </POU>
 </TcPlcObject>

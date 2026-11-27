@@ -1,0 +1,36 @@
+Failed to parse /app/namespaces/d6f73763-31bc-4bea-8f49-b5906058e129/lcls-twincat-motion/.tmpcheck/impl1.st : Exception: UnexpectedCharacters: No terminal matches 'b' in the current parser context, at line 1 col 1
+
+bError := TRUE;
+^
+Expected one of: 
+	* _INTERFACE
+	* _FUNCTION
+	* _TYPE
+	* _METHOD
+	* FUNCTION_BLOCK
+	* _PROGRAM
+	* _PROPERTY
+	* _ACTION
+	* _VAR_GLOBAL
+	* SEMICOLON
+
+Failed to parse some source code files:
+/app/namespaces/d6f73763-31bc-4bea-8f49-b5906058e129/lcls-twincat-motion/.tmpcheck/impl1.st: 
+---------------------------------------------------------------------------------------------
+(UnexpectedCharacters) No terminal matches 'b' in the current parser context, at line 1 col 1
+
+bError := TRUE;
+^
+Expected one of: 
+	* _INTERFACE
+	* _FUNCTION
+	* _TYPE
+	* _METHOD
+	* FUNCTION_BLOCK
+	* _PROGRAM
+	* _PROPERTY
+	* _ACTION
+	* _VAR_GLOBAL
+	* SEMICOLON
+
+
