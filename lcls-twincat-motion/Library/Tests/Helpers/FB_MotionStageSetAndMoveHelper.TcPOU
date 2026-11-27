@@ -2,8 +2,24 @@
 <TcPlcObject Version="1.1.0.1">
   <POU Name="FB_MotionStageSetAndMoveHelper" Id="{d7e042f5-46bb-44d9-bf49-77a017ae9e25}" SpecialFunc="None">
     <Declaration><![CDATA[FUNCTION_BLOCK FB_MotionStageSetAndMoveHelper
+(*
+    Test helper: reset an stMotionStage, set it to a start position, then move it to a goal position.
+
+    Usage: hold bExecute TRUE and poll the outputs. The request starts on the rising edge of
+    bExecute and stops on the falling edge, which aborts the position set, clears the move
+    command and deactivates the axis. The result outputs (bResetDone, bSetDone, bMotionStarted,
+    bMoveDone and bError) are latched: they hold their result until the next rising edge of
+    bExecute or a call to Reset(), so a completed or failed step cannot silently disappear
+    while bExecute is held.
+
+    The motion stage must have its own FB_MotionStage running outside of this block.
+
+    History:
+    - 2026-11-27: handle the falling edge of bExecute (stop motion) and latch the result
+      outputs, per convention conv_4131eec9c934.
+*)
 VAR_INPUT
-    // Begin on rising edge, stop on falling edge.
+    // Start the request on the rising edge, stop the motion on the falling edge.
     bExecute: BOOL;
     // The position to set the motor to
     fStartPosition: LREAL;
@@ -15,27 +31,38 @@ VAR_INPUT
     fDelta: LREAL;
 END_VAR
 VAR_IN_OUT
+    // The motion stage to operate on
     stMotionStage: ST_MotionStage;
 END_VAR
 VAR_OUTPUT
-    // Goes to TRUE once the motor has no errors and is deactivated.
+    // Latched TRUE once the motor has no errors and is deactivated. Cleared by the next rising edge of bExecute or by Reset().
     bResetDone: BOOL;
-    // Goes to TRUE once the set position completes.
+    // Latched TRUE once the set position completes. Cleared by the next rising edge of bExecute or by Reset().
     bSetDone: BOOL;
-    // Goes to TRUE once the motor begins moving.
+    // Latched TRUE once the motor begins moving. Cleared by the next rising edge of bExecute or by Reset().
     bMotionStarted: BOOL;
-    // Goes to TRUE once the motor reaches its destination.
+    // Latched TRUE once the motor reaches its destination. Cleared by the next rising edge of bExecute or by Reset().
     bMoveDone: BOOL;
+    // Latched TRUE if the stage reports an error while a request is active. Cleared by the next rising edge of bExecute or by Reset().
+    bError: BOOL;
 END_VAR
 VAR
+    // Rising edge of bExecute: start a new request and clear the latched results
     rtExec: R_TRIG;
+    // Falling edge of bExecute: stop the motion and abort the request
+    ftExec: F_TRIG;
+    // Sets the motor to the start position before the move
     mcSetPos: MC_SetPosition;
 END_VAR
 ]]></Declaration>
     <Implementation>
-      <ST><![CDATA[rtExec(CLK:=bExecute);
+      <ST><![CDATA[// Evaluate the command edges
+rtExec(CLK:=bExecute);
+ftExec(CLK:=bExecute);
 
+// Rising edge of bExecute: start a new request and clear the latched results of the previous one
 IF rtExec.Q THEN
+    stMotionStage.bMoveCmd := FALSE;
     stMotionStage.bReset := TRUE;
     stMotionStage.bEnable := FALSE;
     stMotionStage.nEnableMode := E_StageEnableMode.NEVER;
@@ -47,12 +74,41 @@ IF rtExec.Q THEN
     bSetDone := FALSE;
     bMotionStarted := FALSE;
     bMoveDone := FALSE;
+    bError := FALSE;
 END_IF
 
-bResetDone := NOT stMotionStage.bError AND NOT stMotionStage.bBusy;
-bMoveDone := stMotionStage.Axis.NcToPlc.ActPos <= fGoalPosition + fDelta AND
+// Falling edge of bExecute: stop the motion and abort the request. The latched results are
+// left as-is, so a step that finished (or failed) stays visible until it is acknowledged.
+IF ftExec.Q THEN
+    stMotionStage.bMoveCmd := FALSE;
+    stMotionStage.bExecute := FALSE;
+    stMotionStage.bReset := TRUE;
+    stMotionStage.bEnable := FALSE;
+    stMotionStage.nEnableMode := E_StageEnableMode.NEVER;
+    mcSetPos(
+        Axis:=stMotionStage.Axis,
+        Execute:=FALSE
+    );
+END_IF
+
+// Nothing else to do while the request is inactive: the latched outputs are held
+IF NOT bExecute THEN
+    RETURN;
+END_IF
+
+// Latch the reset result: the motor must be free of errors and deactivated
+bResetDone S= NOT stMotionStage.bError AND NOT stMotionStage.bBusy;
+
+// Latch a stage error for the caller to inspect
+IF bResetDone THEN
+    bError S= stMotionStage.bError;
+END_IF
+
+// Latch the arrival: the move is done once we are within fDelta of the goal
+bMoveDone S= stMotionStage.Axis.NcToPlc.ActPos <= fGoalPosition + fDelta AND
              stMotionStage.Axis.NcToPlc.ActPos >= fGoalPosition - fDelta;
 
+// Set the start position before the move
 IF NOT bSetDone THEN
     stMotionStage.bReset := TRUE;
     stMotionStage.bEnable := FALSE;
@@ -64,10 +120,13 @@ IF NOT bSetDone THEN
             Mode:=FALSE,
             Done=>
         );
+        // Latch a failure of the position set for the caller to inspect
+        bError S= mcSetPos.Error;
     ELSE
         bSetDone := TRUE;
     END_IF
-ELSE
+ELSIF NOT bMoveDone THEN
+    // Command the move to the goal
     stMotionStage.bEnable := TRUE;
     IF NOT bMotionStarted AND NOT stMotionStage.Axis.Status.Disabled THEN
         stMotionStage.fPosition := fGoalPosition;
@@ -77,6 +136,7 @@ ELSE
     END_IF
 END_IF
 
+// Once the move is done, deactivate the motor
 IF bMoveDone THEN
     stMotionStage.bReset := TRUE;
 END_IF
@@ -85,6 +145,10 @@ END_IF
     <Method Name="Reset" Id="{099bbc37-1b9e-476a-b5a9-5f8f1f38a75e}">
       <Declaration><![CDATA[
 METHOD PUBLIC Reset
+(*
+    Return the helper to its initial state: forget the pending execute edges, deactivate
+    the motor and clear all latched outputs.
+*)
 VAR_IN_OUT
     stMotionStage : ST_MotionStage;
 END_VAR
@@ -92,6 +156,7 @@ END_VAR
       <Implementation>
         <ST><![CDATA[
 rtExec(CLK:=FALSE);
+ftExec(CLK:=FALSE);
 
 stMotionStage.bReset := FALSE;
 stMotionStage.bEnable := FALSE;
@@ -104,6 +169,7 @@ bResetDone := FALSE;
 bSetDone := FALSE;
 bMotionStarted := FALSE;
 bMoveDone := FALSE;
+bError := FALSE;
 ]]></ST>
       </Implementation>
     </Method>
