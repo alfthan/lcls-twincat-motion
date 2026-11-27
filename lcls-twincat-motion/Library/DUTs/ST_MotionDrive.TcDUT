@@ -7,12 +7,40 @@ STRUCT
     (* Hardware *)
 
     // NC Forward Limit Switch: TRUE if ok to move
+    {attribute 'pytmc' := '
+        pv: PLC:bLimitForwardEnable
+        io: i
+        field: ZNAM FALSE
+        field: ONAM TRUE
+        field: DESC FALSE if forward limit hit
+    '}
     bLimitForwardEnable AT %I*: BOOL;
     // NC Backward Limit Switch: TRUE if ok to move
+    {attribute 'pytmc' := '
+        pv: PLC:bLimitBackwardEnable
+        io: i
+        field: ZNAM FALSE
+        field: ONAM TRUE
+        field: DESC FALSE if reverse limit hit
+    '}
     bLimitBackwardEnable AT %I*: BOOL;
     // NO Home Switch: TRUE if at home
+    {attribute 'pytmc' := '
+        pv: PLC:bHome
+        io: i
+        field: ZNAM FALSE
+        field: ONAM TRUE
+        field: DESC TRUE if at homing switch
+    '}
     bHome AT %I*: BOOL;
     // NC Brake Output: TRUE to release brake
+    {attribute 'pytmc' := '
+        pv: PLC:bBrakeRelease
+        io: i
+        field: ZNAM FALSE
+        field: ONAM TRUE
+        field: DESC TRUE if brake released
+    '}
     bBrakeRelease AT %Q*: BOOL;
 
     // Raw encoder IO for ULINT (Biss-C)
@@ -27,28 +55,97 @@ STRUCT
     (* Psuedo-hardware *)
 
     // Forward enable EPS summary
+    {attribute 'pytmc' := '
+        pv: PLC:bAllForwardEnable
+        io: i
+        field: ZNAM FALSE
+        field: ONAM TRUE
+        field: DESC Summary of permission to move forward
+    '}
     bAllForwardEnable: BOOL:=FALSE;
     // Backward enable EPS summary
+    {attribute 'pytmc' := '
+        pv: PLC:bAllBackwardEnable
+        io: i
+        field: ZNAM FALSE
+        field: ONAM TRUE
+        field: DESC Summary of permission to move backward
+    '}
     bAllBackwardEnable: BOOL:=FALSE;
     // Enable EPS summary encapsulating emergency stop button and any additional motion preventive hardware
+    {attribute 'pytmc' := '
+        pv: PLC:bAllEnable
+        io: i
+        field: ZNAM FALSE
+        field: ONAM TRUE
+        field: DESC Summary of permission to have power
+    '}
     bAllEnable: BOOL:=FALSE;
     // Forward virtual gantry limit switch
+    {attribute 'pytmc' := '
+        pv: PLC:bGantryForwardEnable
+        io: i
+        field: ZNAM FALSE
+        field: ONAM TRUE
+        field: DESC TRUE if gantry ok to move forward
+    '}
     bGantryForwardEnable: BOOL:=FALSE;
     // Backward virtual gantry limit switch
+    {attribute 'pytmc' := '
+        pv: PLC:bGantryBackwardEnable
+        io: i
+        field: ZNAM FALSE
+        field: ONAM TRUE
+        field: DESC TRUE if gantry ok to move backward
+    '}
     bGantryBackwardEnable: BOOL:=FALSE;
 
     (* Settings *)
     // Name to use for log messages, fast faults, etc.
+    {attribute 'pytmc' := '
+        pv: PLC:sName
+        io: i
+        field: DESC PLC program name
+    '}
     sName: STRING;
     // If TRUE, we want to enable the motor independently of PMPS or other safety systems.
+    {attribute 'pytmc' := '
+        pv: PLC:bPowerSelf
+        io: i
+        field: ZNAM FALSE
+        field: ONAM TRUE
+        field: DESC FALSE if axis is in PMPS
+    '}
     bPowerSelf: BOOL:=FALSE;
     // Determines when we automatically enable the motor
+    {attribute 'pytmc' := '
+        pv: PLC:nEnableMode
+        io: i
+        field: DESC When the axis automatically gets power
+    '}
     nEnableMode: E_StageEnableMode:=E_StageEnableMode.DURING_MOTION;
     // Determines when we automatically disengage the brake
+    {attribute 'pytmc' := '
+        pv: PLC:nBrakeMode
+        io: i
+        field: DESC When the brake will be released
+    '}
     nBrakeMode: E_StageBrakeMode:=E_StageBrakeMode.IF_ENABLED;
     // Determines our encoder homing strategy
+    {attribute 'pytmc' := '
+        pv: PLC:nHomingMode
+        io: i
+        field: DESC Homing strategy
+    '}
     nHomingMode: E_EpicsHomeCmd:=E_EpicsHomeCmd.NONE;
     // Set true to activate gantry EPS
+    {attribute 'pytmc' := '
+        pv: PLC:bGantryAxis
+        io: i
+        field: ZNAM FALSE
+        field: ONAM TRUE
+        field: DESC TRUE if gantry EPS active
+    '}
     bGantryAxis: BOOL:=FALSE;
 
     // Set to gantry difference tolerance
@@ -59,22 +156,69 @@ STRUCT
 
     (* Commands *)
     // Used internally to request enables
+    {attribute 'pytmc' := '
+        pv: PLC:bEnable
+        io: io
+        field: ZNAM FALSE
+        field: ONAM TRUE
+        field: DESC Used internally to request enables
+    '}
     bEnable: BOOL;
 
     (* Info *)
     // Unique ID assigned to each axis in the NC
+    {attribute 'pytmc' := '
+        pv: PLC:nMotionAxisID
+        io: i
+        field: DESC Unique axis ID in the NC
+    '}
     nMotionAxisID: UDINT:=0;
 
     (* Returns *)
     // TRUE if done enabling
+    {attribute 'pytmc' := '
+        pv: PLC:bEnableDone
+        io: i
+        field: ZNAM FALSE
+        field: ONAM TRUE
+        field: DESC TRUE if done enabling
+    '}
     bEnableDone: BOOL;
     // TRUE if in the middle of a command
+    {attribute 'pytmc' := '
+        pv: PLC:bBusy
+        io: i
+        field: ZNAM FALSE
+        field: ONAM TRUE
+        field: DESC TRUE if in the middle of a command
+    '}
     bBusy: BOOL;
     // TRUE if we've done a command and it has finished
+    {attribute 'pytmc' := '
+        pv: PLC:bDone
+        io: i
+        field: ZNAM FALSE
+        field: ONAM TRUE
+        field: DESC TRUE if command finished successfully
+    '}
     bDone: BOOL;
     // TRUE if the motor has been homed, or does not need to be homed
+    {attribute 'pytmc' := '
+        pv: PLC:bHomed
+        io: i
+        field: ZNAM FALSE
+        field: ONAM TRUE
+        field: DESC TRUE if the motor has been homed
+    '}
     bHomed: BOOL;
     // TRUE if we have safety permission to move
+    {attribute 'pytmc' := '
+        pv: PLC:bSafetyReady
+        io: i
+        field: ZNAM FALSE
+        field: ONAM TRUE
+        field: DESC TRUE if safe to start a move
+    '}
     bSafetyReady: BOOL;
     // Internal hook for custom error messages
     sCustomErrorMessage: STRING;

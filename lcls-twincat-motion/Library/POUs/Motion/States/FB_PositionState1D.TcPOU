@@ -30,20 +30,36 @@ VAR_IN_OUT
     '}
     astPositionState: ARRAY[1..GeneralConstants.MAX_STATES] OF ST_PositionState;
     // Set this to a nonzero value to request a new move. It will be reset to zero every cycle. This should be hooked up to a user's EPICS enum input.
+    {attribute 'pytmc' := '
+        pv: STATE:SET
+        io: io
+        field: DESC Requested position state index
+    '}
     eEnumSet: UINT;
     // The current state index, or zero if we are not at a state. This should be hooked up to a user's EPICS enum output.
+    {attribute 'pytmc' := '
+        pv: STATE:GET
+        io: i
+        field: DESC Current position state index
+    '}
     eEnumGet: UINT;
 END_VAR
 VAR_INPUT
     // Set this to TRUE to enable input state moves, or FALSE to disable them.
     bEnable: BOOL;
     // Normal EPICS inputs, gathered into a single struct
-    {attribute 'pytmc' := 'pv: STATE'}
+    {attribute 'pytmc' := '
+        pv: STATE
+        io: o
+    '}
     stEpicsToPlc: ST_StateEpicsToPlc;
 END_VAR
 VAR_OUTPUT
     // Normal EPICS outputs, gathered into a single struct
-    {attribute 'pytmc' := 'pv: STATE'}
+    {attribute 'pytmc' := '
+        pv: STATE
+        io: i
+    '}
     stPlcToEpics: ST_StatePlcToEpics;
 END_VAR
 VAR

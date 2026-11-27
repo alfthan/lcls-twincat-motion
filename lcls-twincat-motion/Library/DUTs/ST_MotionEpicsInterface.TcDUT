@@ -5,6 +5,11 @@
     // Defines the EPICS interface to moving a motor in TwinCAT
 STRUCT
  // Name to use for log messages, fast faults, etc.
+    {attribute 'pytmc' := '
+        pv: PLC:sName
+        io: i
+        field: DESC PLC program name
+    '}
     sName: STRING;
     // Set to gantry difference tolerance
     nGantryTol: LINT:=0;
@@ -13,6 +18,13 @@ STRUCT
 
     (* Commands *)
     // Used internally to request enables
+    {attribute 'pytmc' := '
+        pv: PLC:bEnable
+        io: io
+        field: ZNAM FALSE
+        field: ONAM TRUE
+        field: DESC Used internally to request enables
+    '}
     bEnable: BOOL;
 
     // Used internally to reset errors and other state
@@ -25,20 +37,57 @@ STRUCT
     '}
     bReset: BOOL;
     // Used internally and by the IOC to start or stop a move
+    {attribute 'pytmc' := '
+        pv: PLC:bExecute
+        io: io
+        field: ZNAM FALSE
+        field: ONAM TRUE
+        field: DESC Used by the IOC to start or stop a move
+    '}
     bExecute: BOOL;
 
     (* Command Args *)
     // Used internally and by the IOC to pick what kind of move to do
+    {attribute 'pytmc' := '
+        pv: PLC:nCommand
+        io: io
+        field: DESC Used by the IOC to pick move type
+    '}
     nCommand: INT;
     // Used internally and by the IOC to pass additional data to some commands
+    {attribute 'pytmc' := '
+        pv: PLC:nCmdData
+        io: io
+        field: DESC Used by the IOC to pass extra args
+    '}
     nCmdData: INT;
     // Used internally and by the IOC to pick a destination for the move
+    {attribute 'pytmc' := '
+        pv: PLC:fPosition
+        io: io
+        field: DESC Used by the IOC as the move destination
+    '}
     fPosition: LREAL;
     // Used internally and by the IOC to pick a move velocity
+    {attribute 'pytmc' := '
+        pv: PLC:fVelocity
+        io: io
+        field: DESC Used by the IOC to set velocity
+    '}
     fVelocity: LREAL;
     // Used internally and by the IOC to pick a move acceleration
+    {attribute 'pytmc' := '
+        pv: PLC:fAcceleration
+        io: io
+        field: DESC Used by the IOC to set acceleration
+    '}
     fAcceleration: LREAL;
     // Used internally and by the IOC to pick a move deceleration
+    {attribute 'pytmc' := '
+        pv: PLC:fDeceleration
+        io: io
+        field: DESC Used by the IOC to set deceleration
+    '}
     fDeceleration: LREAL;
     // Used internally and by the IOC to pick a home position
     {attribute 'pytmc' := '
@@ -50,13 +99,39 @@ STRUCT
 
     (* Info *)
     // Unique ID assigned to each axis in the NC
+    {attribute 'pytmc' := '
+        pv: PLC:nMotionAxisID
+        io: i
+        field: DESC Unique axis ID in the NC
+    '}
     nMotionAxisID: UDINT:=0;
     (* Returns *)
     // TRUE if in the middle of a command
+    {attribute 'pytmc' := '
+        pv: PLC:bBusy
+        io: i
+        field: ZNAM FALSE
+        field: ONAM TRUE
+        field: DESC TRUE if in the middle of a command
+    '}
     bBusy: BOOL;
     // TRUE if we've done a command and it has finished
+    {attribute 'pytmc' := '
+        pv: PLC:bDone
+        io: i
+        field: ZNAM FALSE
+        field: ONAM TRUE
+        field: DESC TRUE if command finished successfully
+    '}
     bDone: BOOL;
     // TRUE if the motor has been homed, or does not need to be homed
+    {attribute 'pytmc' := '
+        pv: PLC:bHomed
+        io: i
+        field: ZNAM FALSE
+        field: ONAM TRUE
+        field: DESC TRUE if the motor has been homed
+    '}
     bHomed: BOOL;
 
     // TRUE if we're in an error state

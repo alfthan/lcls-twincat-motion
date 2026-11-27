@@ -13,27 +13,97 @@ STRUCT
     nModeOfOperationDisplay AT %I*	: 	SINT;
     //nActualPosition 		AT %I*	: 	DINT;
     (*CSP drive mode*)
+    {attribute 'pytmc' := '
+        pv: nFollowingError
+        io: i
+        field: DESC Following error from the drive
+    '}
     nFollowingError 		AT %I*	: 	DINT;
     (* Global variables for the RPDO data to the drive. Each one is linked to the respective RPDO channel. *)
     // connected to I/O Task 'Control Word'
+    {attribute 'pytmc' := '
+        pv: nDriveControl
+        io: i
+        field: DESC DS402 control word sent to drive
+    '}
     nDriveControl			AT %Q*	:	UINT;
     // Connected to NC task Ctrl 1 and Ctrl 2
+    {attribute 'pytmc' := '
+        pv: nDriveControlNC
+        io: i
+        field: DESC Control word mirrored from NC task
+    '}
     nDriveControlNC			AT %I*	:	UINT;
+    {attribute 'pytmc' := '
+        pv: nTargetPosition
+        io: i
+        field: DESC Target position sent to drive
+    '}
     nTargetPosition 		AT %Q* 	: 	DINT;
+    {attribute 'pytmc' := '
+        pv: nModeOfOperation
+        io: i
+        field: DESC DS402 mode requested by the PLC
+    '}
     nModeOfOperation 		AT %Q* 	: 	SINT;
+    {attribute 'pytmc' := '
+        pv: nModeOfOperationNC
+        io: i
+        field: DESC Mode mirrored from NC task
+    '}
     nModeOfOperationNC 		AT %I* 	: 	SINT;
     (* Global variables for the RPDO data to the drive. Each one is linked to the respective RPDO channel. *)
+    {attribute 'pytmc' := '
+        pv: nProfilVelocity
+        io: i
+        field: DESC Profile velocity sent to drive
+    '}
     nProfilVelocity 		AT %Q* 	: 	DINT;
+    {attribute 'pytmc' := '
+        pv: nProfilAcceleration
+        io: i
+        field: DESC Profile acceleration sent to drive
+    '}
     nProfilAcceleration		AT %Q* 	: 	DINT;
+    {attribute 'pytmc' := '
+        pv: nProfilDecceleration
+        io: i
+        field: DESC Profile deceleration sent to drive
+    '}
     nProfilDecceleration	AT %Q* 	: 	DINT;
+    {attribute 'pytmc' := '
+        pv: nVelocityActualValue
+        io: i
+        field: DESC Velocity actual value from drive
+    '}
     nVelocityActualValue	AT %Q* 	: 	DINT;
     (* Global variables for the TPDO data from the drive. Each one is linked to the respective TPDO channel. *)
+    {attribute 'pytmc' := '
+        pv: nScantargetPosition
+        io: i
+        field: DESC Scan target position sent to drive
+    '}
     nScantargetPosition		AT %Q*	: 	DINT;
+    {attribute 'pytmc' := '
+        pv: uScantargetVelocity
+        io: i
+        field: DESC Scan target velocity sent to drive
+    '}
     uScantargetVelocity		AT %Q*	: 	ULINT;
     (* Port Number of EtherCAT Slave *)
+    {attribute 'pytmc' := '
+        pv: nSlaveAddr
+        io: i
+        field: DESC EtherCAT slave port address
+    '}
     nSlaveAddr	AT %I*  : UINT;
     (* EtherCAT slave ESM state, linked to the slave's InfoData.State.
        Low nibble is the state: 1=INIT, 2=PREOP, 4=SAFEOP, 8=OP. *)
+    {attribute 'pytmc' := '
+        pv: nEcatState
+        io: i
+        field: DESC EtherCAT slave ESM state
+    '}
     nEcatState	AT %I*  : UINT;
 END_STRUCT
 END_TYPE
