@@ -1,31 +1,75 @@
 ﻿<?xml version="1.0" encoding="utf-8"?>
 <TcPlcObject Version="1.1.0.1">
   <POU Name="FB_MCS2StepMode" Id="{a0cda8fc-6342-4ae1-b3b5-7e5da20f78df}" SpecialFunc="None">
-    <Declaration><![CDATA[FUNCTION_BLOCK FB_MCS2StepMode
+    <Declaration><![CDATA[(*
+    Purpose:
+        Sequence one open-loop (step-mode) move of an MCS2 DS402 drive and report
+        its busy/done/aborted outcome to the owning stage function block.
+    Usage:
+        Call every cycle from FB_MotionStageMCS2 while the drive is in
+        E_MCS2OpMode.STEP. Hold bExecute TRUE for the whole move: the move starts
+        on its rising edge, and the caller drops bExecute when it sees
+        bStepMoveDone or bStepMoveAborted. Wire stDS402Drive and stMotionStage to
+        the owning stage's own structures; the block returns immediately while
+        either reference is invalid. Halt() aborts a move in progress, Reset()
+        aborts it from the stage reset path. Not intended for use outside
+        lcls-twincat-motion.
+    Objectives:
+        - Sequence the move as an explicit, non-blocking E_MoveState machine: one
+          action per state, every transition on a named condition.
+        - Hold DS402 "Enable operation" (control word bit 3) for the whole move and
+          pulse "New set-point" (bit 4) once to command the step move.
+        - Report done only when the drive signals TargetReached AND the 80 ms
+          settling time has elapsed, so the stage has come to rest first.
+        - Lift a drive op-mode fault (status word bit 13) to stMotionStage.bError so
+          the stage fault path reports it instead of the block stalling silently.
+        - Surface Halt()/Reset() on bStepMoveAborted so the caller stops waiting.
+    History:
+        2025-10-28  Yann Stephen Mandza  Created, split out of the DS402/MCS2
+                                         channel-state refactor.
+        2026-05-26  ysmandza            Current-position homing change touching the
+                                        shared move sequence.
+        2026-11-27  Mandza              POU and method headers plus per-declaration
+                                        comments added.
+*)
+FUNCTION_BLOCK FB_MCS2StepMode
 VAR_INPUT
+    // Rising edge starts one step-mode move; hold TRUE until done or aborted.
     bExecute : BOOL;
 END_VAR
 VAR_IN_OUT
+    // Drive process data: control word written here, status word read here.
     stDS402Drive         : ST_DS402Drive;
+    // Owning stage command/state interface; faults are raised on stMotionStage.bError.
     stMotionStage        : ST_MotionStage;
 END_VAR
 
 VAR_OUTPUT
+    // TRUE while a step-mode move is executing.
     bStepMoveBusy        : BOOL;
+    // TRUE once the move reached target and settled; held until the next move starts.
     bStepMoveDone        : BOOL;
+    // TRUE when Halt()/Reset() or a drive fault stopped the move before target.
     bStepMoveAborted     : BOOL;
 END_VAR
 VAR
+    // Sequencer state; IDLING whenever no move is active.
     eStepState           : E_MoveState := E_MoveState.IDLING;
+    // One-cycle abort request set by Reset(): stops the move in progress.
     bReset :  BOOL;
+    // One-cycle abort request set by Halt(): stops the move in progress.
     bHalt : BOOL;
+    // Settling hold-off started when the move is commanded; preset T#80MS, below.
     tonSettlingTime     : TON;
+    // Rising-edge detector on bExecute: the start-of-move trigger.
     {attribute 'hide'}
     rtStepMove               : R_TRIG;
 END_VAR
 ]]></Declaration>
     <Implementation>
-      <ST><![CDATA[IF NOT __ISVALIDREF(stDS402Drive)
+      <ST><![CDATA[// Both structures are wired by the owning stage FB; without them there is
+// nothing to command and nothing to report to.
+IF NOT __ISVALIDREF(stDS402Drive)
     OR NOT __ISVALIDREF(stMotionStage)  THEN
    RETURN;
 END_IF
@@ -33,54 +77,67 @@ END_IF
 rtStepMove(CLK := bExecute);
 
 CASE eStepState OF
+    // Idle: wait for a new move request.
     E_MoveState.IDLING:
         IF rtStepMove.Q THEN
+            // New move: clear the previous outcome before anything is reported.
             bStepMoveBusy := TRUE;
             bStepMoveDone := FALSE;
             bStepMoveAborted := FALSE;
             tonSettlingTime.IN:=FALSE;
+            // Control word bit 3: hold "Enable operation" for the whole move.
             stDS402Drive.nDriveControl.3 := TRUE;
             eStepState := E_MoveState.INIT;
         END_IF
 
+    // Do not command a move onto an already faulted stage.
     E_MoveState.INIT:
         IF stMotionStage.bError THEN
             eStepState := E_MoveState.ERROR;
         ELSE
+            // Control word bit 4: pulse "New set-point" to start the step move.
             stDS402Drive.nDriveControl.4 := TRUE;
             tonSettlingTime.IN:=TRUE;
             eStepState := E_MoveState.IN_PROGRESS;
         END_IF
 
+    // Move commanded: watch for an abort, a drive fault and the final target.
     E_MoveState.IN_PROGRESS:
         IF bHalt OR bReset THEN
+            // Abort request: report it, then release the set-point below.
             bStepMoveAborted := TRUE;
             eStepState := E_MoveState.INTERRUPTED;
         ELSIF stDS402Drive.stDriveStatus.Bit13_OpModeSpecific THEN
+            // Step-mode op-mode-specific bit 13: the drive aborted the move.
             stMotionStage.bError := TRUE;
             eStepState := E_MoveState.ERROR;
         ELSE
+            // TargetReached plus 80 ms of settling: the stage has come to rest.
             IF tonSettlingTime.Q AND stDS402Drive.stDriveStatus.TargetReached THEN
                 eStepState := E_MoveState.REACHED;
             END_IF
         END_IF
 
+    // Aborted: release the set-point, drop busy and return to idle.
     E_MoveState.INTERRUPTED:
         stDS402Drive.nDriveControl.4 := FALSE;
         bStepMoveBusy := FALSE;
         eStepState := E_MoveState.IDLING;
 
+    // Target reached: report done and release the set-point.
     E_MoveState.REACHED:
         bStepMoveBusy := FALSE;
         bStepMoveDone := TRUE;
         stDS402Drive.nDriveControl.4 := FALSE;
         eStepState := E_MoveState.DONE;
 
+    // Done: keep the result visible until the stage acknowledges it via bDone.
     E_MoveState.DONE:
         IF stMotionStage.bDone THEN
             eStepState := E_MoveState.IDLING;
         END_IF
 
+    // Fault: hold busy and done low until the stage error has been cleared.
     E_MoveState.ERROR:
         bStepMoveBusy := FALSE;
         bStepMoveDone := FALSE;
@@ -88,12 +145,34 @@ CASE eStepState OF
             eStepState := E_MoveState.IDLING;
         END_IF
 END_CASE
+
+// Fixed 80 ms settling hold-off, started when the move is commanded above.
 tonSettlingTime(PT:=T#80MS);
+// Halt()/Reset() are one-cycle requests; they are consumed here.
 bHalt := FALSE;
-bReset := FALSE;]]></ST>
+bReset := FALSE;
+]]></ST>
     </Implementation>
     <Method Name="Halt" Id="{404ed7bc-5145-419a-8c32-b3d5cc2b5db5}">
-      <Declaration><![CDATA[METHOD Halt : BOOL
+      <Declaration><![CDATA[(*
+    Purpose:
+        Request an abort of the step-mode move in progress.
+    Usage:
+        Call from the owning stage FB when the operator drops bExecute mid-move.
+        The request survives only until the next POU cycle, so the caller does not
+        have to reset it. Calling it while the block is IDLING has no effect.
+    Objectives:
+        - Keep the abort request one cycle long, so a stale Halt() cannot stop the
+          following move.
+        - Make the abort observable on bStepMoveAborted instead of silently
+          returning to idle.
+    History:
+        2026-11-27  Mandza  Method header and declaration comments added.
+    Returns:
+        Not used; the method acts through its side effect, so the return value
+        stays FALSE and callers must not test it.
+*)
+METHOD Halt : BOOL
 VAR_INPUT
 END_VAR
 ]]></Declaration>
@@ -102,7 +181,26 @@ END_VAR
       </Implementation>
     </Method>
     <Method Name="Reset" Id="{0f20cf36-480d-4ea2-8024-db9756e7a2d6}">
-      <Declaration><![CDATA[METHOD Reset : BOOL
+      <Declaration><![CDATA[(*
+    Purpose:
+        Request an abort of the step-mode move in progress from the stage reset
+        path.
+    Usage:
+        Call from the owning stage FB when it handles stMotionStage.bReset. The
+        effect on this block is the same abort as Halt(); the request survives
+        only until the next POU cycle, so the caller does not reset it. The done
+        and aborted flags are re-initialised by the next rising edge of bExecute.
+    Objectives:
+        - Give the reset path a named entry point instead of reusing Halt(), so the
+          calling code reads as reset semantics.
+        - Stop the move and report it on bStepMoveAborted within one cycle.
+    History:
+        2026-11-27  Mandza  Method header and declaration comments added.
+    Returns:
+        Not used; the method acts through its side effect, so the return value
+        stays FALSE and callers must not test it.
+*)
+METHOD Reset : BOOL
 VAR_INPUT
 END_VAR
 ]]></Declaration>
