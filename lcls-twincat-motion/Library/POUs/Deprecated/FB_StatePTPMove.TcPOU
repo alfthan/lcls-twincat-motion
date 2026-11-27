@@ -19,6 +19,16 @@ VAR_INPUT
     bExecute: BOOL;
 
     bMoveOk: BOOL;
+
+    // On rising edge, acknowledge and clear the latched error, but only from a
+    // known-safe state (the stage is not faulted and not moving)
+    {attribute 'pytmc' := '
+        pv: RESET
+        io: io
+        field: ZNAM False
+        field: ONAM True
+    '}
+    bReset: BOOL;
 END_VAR
 VAR_IN_OUT
     stMotionStage: ST_MotionStage;
@@ -65,15 +75,37 @@ END_VAR
 VAR
     bExecTrig: R_TRIG;
     bExecEnd: F_TRIG;
+    // Detects a new fault on the stage so it can be latched once
+    rtStageError: R_TRIG;
+    // Detects the acknowledge request on bReset
+    rtReset: R_TRIG;
     fActPosition: LREAL;
     fLowPos: LREAL;
     fHighPos: LREAL;
 END_VAR
 ]]></Declaration>
     <Implementation>
-      <ST><![CDATA[bExecTrig(CLK:=bExecute);
+      <ST><![CDATA[// Latch the stage error so a transient axis fault is not silently reported as
+// healthy again on the next cycle: bError and sError stay set until they are
+// acknowledged through bReset, so the caller keeps the fault history.
+rtStageError(CLK:=stMotionStage.bError);
+IF rtStageError.Q THEN
+    bError := TRUE;
+    sError := stMotionStage.sErrorMessage;
+END_IF
+
+// Only acknowledge the latched error from a known-safe state: the stage is no
+// longer faulted and is not moving. A reset while the axis is still faulted is
+// ignored and must be re-issued once the stage reports healthy again.
+rtReset(CLK:=bReset);
+IF rtReset.Q AND NOT stMotionStage.bError AND NOT stMotionStage.bBusy THEN
+    bError := FALSE;
+    sError := '';
+END_IF
+
+bExecTrig(CLK:=bExecute);
 IF bExecTrig.Q AND bMoveOk THEN
-    IF NOT stMotionStage.bBusy AND NOT stMotionStage.bError THEN
+    IF NOT stMotionStage.bBusy AND NOT bError THEN
         stMotionStage.bExecute := TRUE;
         stMotionStage.nCommand := E_EpicsMotorCmd.MOVE_ABSOLUTE;
         stMotionStage.fPosition := stPositionState.fPosition;
@@ -84,8 +116,6 @@ IF bExecTrig.Q AND bMoveOk THEN
         bBusy := TRUE;
     END_IF
 END_IF
-bError := stMotionStage.bError;
-sError := stMotionStage.sErrorMessage;
 
 fActPosition := stMotionStage.stAxisStatus.fActPosition;
 fLowPos := stPositionState.fPosition - stPositionState.fDelta;
