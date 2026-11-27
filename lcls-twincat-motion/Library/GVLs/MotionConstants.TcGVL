@@ -15,6 +15,19 @@ VAR_GLOBAL CONSTANT
     If you are not sure how many motors are used per state block, check MOTION_GVL.nMaxStateMotorCount
     *)
     MAX_STATE_MOTORS: UINT := 3;
+
+    (*
+    Depth, in samples, of the position rolling-average buffer in FB_MicroStepCountTest.
+    Used for the buffer declaration, the averaging loop bound, the divisor and the index wrap,
+    so a change here keeps all four in step.
+    *)
+    MICROSTEP_TEST_BUFFER_DEPTH: UINT := 100;
+
+    (*
+    Step detection threshold of FB_MicroStepCountTest, as a fraction of the nominal microstep size.
+    A measured step change must exceed fMicroStep multiplied by this factor to be counted as a step.
+    *)
+    MICROSTEP_TEST_STEP_THRESHOLD_FACTOR: LREAL := 0.5;
 END_VAR]]></Declaration>
   </GVL>
 </TcPlcObject>

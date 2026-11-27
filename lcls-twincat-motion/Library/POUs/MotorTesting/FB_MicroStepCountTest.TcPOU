@@ -2,6 +2,9 @@
 <TcPlcObject Version="1.1.0.1">
   <POU Name="FB_MicroStepCountTest" Id="{b953130d-6adb-468e-991b-b389a0e4364b}" SpecialFunc="None">
     <Declaration><![CDATA[FUNCTION_BLOCK FB_MicroStepCountTest
+// Measures the effective microstep size of a stepper channel by stepping a known number of full steps
+// and counting the detected microstep-sized position changes in a rolling-averaged position signal.
+// Buffer depth and step detection threshold live in MotionConstants so they are declared once.
 VAR_INPUT
     bExecute: BOOL;
     fStepSize: LREAL;
@@ -25,7 +28,8 @@ VAR
     bDoMove: BOOL;
     nStepCounter: UINT;
 
-    arrPosBuffer: ARRAY [0..99] OF LREAL;
+    // Rolling position buffer, depth from MotionConstants.MICROSTEP_TEST_BUFFER_DEPTH
+    arrPosBuffer: ARRAY [0..MotionConstants.MICROSTEP_TEST_BUFFER_DEPTH - 1] OF LREAL;
     fAvgPos: LREAL;
     nArrIndex: UINT;
     nLoopIndex: UINT;
@@ -53,11 +57,11 @@ bDoMove := bExecute AND nStepCounter < nSteps;
 // Calculate rolling average
 arrPosBuffer[nArrIndex] := Axis.NcToPlc.ActPos;
 fAvgPos := 0;
-FOR nLoopIndex := 0 TO 99 DO
+FOR nLoopIndex := 0 TO MotionConstants.MICROSTEP_TEST_BUFFER_DEPTH - 1 DO
     fAvgPos := fAvgPos + arrPosBuffer[nLoopIndex];
 END_FOR;
-fAvgPos := fAvgPos / 100;
-nArrIndex := (nArrIndex + 1) MOD 100;
+fAvgPos := fAvgPos / MotionConstants.MICROSTEP_TEST_BUFFER_DEPTH;
+nArrIndex := (nArrIndex + 1) MOD MotionConstants.MICROSTEP_TEST_BUFFER_DEPTH;
 
 // Initialize starting variables
 IF NOT bExecute THEN
@@ -72,7 +76,7 @@ IF fbSettleTimer.Q THEN
     IF fStepSize < 0 THEN
         fStepChange := fStepChange * -1;
     END_IF
-    IF fStepChange > fMicroStep * 0.5 THEN
+    IF fStepChange > fMicroStep * MotionConstants.MICROSTEP_TEST_STEP_THRESHOLD_FACTOR THEN
         nStepsCounted := nStepsCounted + 1;
         fStepSum := fStepSum + fStepChange;
         fEstMicroSize := fStepSum / nStepsCounted;
