@@ -477,6 +477,9 @@
     <Compile Include="POUs\Motion\States\Internals\FB_PositionStateLock.TcPOU">
       <SubType>Code</SubType>
     </Compile>
+    <Compile Include="POUs\Motion\Utils\FB_OverridePermit.TcPOU">
+      <SubType>Code</SubType>
+    </Compile>
     <Compile Include="POUs\Motion\Utils\FB_SetEnables.TcPOU">
       <SubType>Code</SubType>
     </Compile>

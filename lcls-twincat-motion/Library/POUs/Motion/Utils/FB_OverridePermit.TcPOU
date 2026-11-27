@@ -1,0 +1,98 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="FB_OverridePermit" Id="{c1a1e2cf-feed-4e00-89a3-9f61c5018290}" SpecialFunc="None">
+    <Declaration><![CDATA[FUNCTION_BLOCK FB_OverridePermit
+(*
+    Time-qualified, self-clearing permit for a manual override (maintenance mode, limit
+    escape, ...).
+
+    Purpose:
+        Replace plain BOOL override flags that directly gate or bypass safety logic. An
+        override is honoured only after its request has been held for a qualification time,
+        and it clears itself after a maximum duration, so no override can stay active
+        indefinitely.
+
+    Usage:
+        Wire the manual request (typically an EPICS command PV) to bRequest and the site
+        safety/interlock permit to bInterlockOK, then drive the override logic from bActive
+        only. bInterlockOK stays authoritative: while it is FALSE the permit is revoked in
+        the same scan and cannot be granted, so an override never bypasses an interlock.
+        Override logic that owns the request should drop it when bExpired is TRUE, so the
+        operator sees the request clear itself instead of silently staying on.
+
+    Objectives:
+        - Honour a request only after it has been continuously held for tQualification.
+        - Revoke immediately when the interlock permit drops.
+        - Clear the permit automatically after tMaxDuration.
+        - Refuse to renew a held request: after an expiry the request must be dropped before
+          the permit can be granted again, so a stuck-on request cannot re-qualify itself.
+
+    History:
+        Scirix agent, 2026-11-27: created to remove the indefinite BOOL safety overrides
+        (audit findings 1090, 154 and 180).
+*)
+VAR_INPUT
+    // Manual override request, e.g. an EPICS MAINT PV that the operator sets TRUE.
+    bRequest: BOOL;
+    // Safety/interlock permit the override stays subordinate to. FALSE revokes an active
+    // permit immediately and blocks a new one. Defaults to FALSE so an unwired permit can
+    // never grant an override.
+    bInterlockOK: BOOL := FALSE;
+    // Time the request must be held continuously before the permit is granted.
+    tQualification: TIME := T#2S;
+    // Maximum time the permit may stay active. On expiry the permit clears itself.
+    tMaxDuration: TIME := T#30MIN;
+END_VAR
+VAR_OUTPUT
+    // TRUE while the override is granted: qualified, interlock-permitted and not expired.
+    bActive: BOOL;
+    // TRUE once the request has been held for tQualification.
+    bQualified: BOOL;
+    // TRUE from the moment the permit expired until the request is dropped again.
+    bExpired: BOOL;
+    // TRUE while a request is present but the safety interlock permit is not.
+    bBlocked: BOOL;
+END_VAR
+VAR
+    // Qualification timer: request held long enough to be honoured.
+    tonQualify: TON;
+    // Duration timer: limits how long the permit may stay active.
+    tonExpire: TON;
+    // Latches an expiry so that a still-asserted request cannot renew itself.
+    bExpiredLatch: BOOL;
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[// Dropping the request is the only way to clear an expiry: a request that is still TRUE
+// when its permit expired must not be able to grant itself again.
+IF NOT bRequest THEN
+    bExpiredLatch := FALSE;
+END_IF
+
+// A request without the safety permit is refused, never queued for later.
+bBlocked := bRequest AND NOT bInterlockOK;
+
+// Qualification: the request must be held, and interlock-permitted, for tQualification.
+// The timer resets whenever either condition is lost, so a flaky request cannot qualify.
+tonQualify(
+    IN := bRequest AND bInterlockOK AND NOT bExpiredLatch,
+    PT := tQualification,
+);
+bQualified := tonQualify.Q;
+
+// The permit itself is always subordinate to the interlock permit.
+bActive := tonQualify.Q AND bInterlockOK AND NOT bExpiredLatch;
+
+// Time limit: the permit clears itself after tMaxDuration.
+tonExpire(
+    IN := bActive,
+    PT := tMaxDuration,
+);
+IF tonExpire.Q THEN
+    bExpiredLatch := TRUE;
+    bActive := FALSE;
+END_IF
+
+bExpired := bExpiredLatch;]]></ST>
+    </Implementation>
+  </POU>
+</TcPlcObject>

@@ -7,6 +7,12 @@ FUNCTION_BLOCK FB_PositionStatePMPS_Base
     FB_PositionStatePMPS without Arbiter, BPTM, FFO
 
     This allows me to test most of the code without an arbiter plc setup
+
+    Maintenance mode (bMaintMode) is a time-qualified, self-clearing permit rather than an
+    indefinite override: it is honoured only after it has been requested for
+    tMaintQualification and it clears itself after tMaintMaxDuration. The stage hardware
+    enable and the EPS power permit stay authoritative, so maintenance mode relaxes the PMPS
+    move bounds but never the safety interlocks.
 *)
 VAR_IN_OUT
     stMotionStage: ST_MotionStage;
@@ -14,11 +20,19 @@ VAR_IN_OUT
 END_VAR
 VAR_INPUT
     bArbiterEnabled: BOOL := TRUE;
+    // Manual maintenance-mode request: TRUE asks to relax the PMPS move bounds so the stage
+    // can be jogged. This is only a request: the override is honoured after it has been held
+    // for tMaintQualification and it clears itself after tMaintMaxDuration, so it can never
+    // stay active indefinitely. Hardware and EPS interlocks stay authoritative.
     {attribute 'pytmc' := '
         pv: MAINT
         io: io
     '}
     bMaintMode: BOOL;
+    // Time the maintenance request must be held continuously before it is honoured.
+    tMaintQualification: TIME := T#2S;
+    // Maximum time the maintenance override may stay active before it clears itself.
+    tMaintMaxDuration: TIME := T#30MIN;
     bRequestTransition: BOOL;
     setState: INT;
     getState: INT;
@@ -31,8 +45,23 @@ VAR_OUTPUT
     bForwardAuthorized: BOOL;
     bBackwardAuthorized: BOOL;
     bArbiterTimeout: BOOL;
+    // TRUE while the maintenance override is in force (qualified, interlock-permitted and
+    // not expired).
+    {attribute 'pytmc' := '
+        pv: MAINT_ACTIVE
+        io: i
+    '}
+    bMaintModeActive: BOOL;
+    // TRUE when the maintenance override expired and must be requested again.
+    {attribute 'pytmc' := '
+        pv: MAINT_EXPIRED
+        io: i
+    '}
+    bMaintModeExpired: BOOL;
 END_VAR
 VAR
+    // Time-qualified, self-clearing maintenance permit (replaces the plain bMaintMode flag).
+    fbMaintPermit: FB_OverridePermit;
     {attribute 'pytmc' := '
         pv: TRANS
         io: i
@@ -83,6 +112,22 @@ END_VAR]]></Declaration>
         <ST><![CDATA[
 // Load the pmps parameters as needed
 HandlePmpsDb();
+
+// Time-qualify the maintenance override and let it clear itself when it expires.
+// bMaintMode is only a request: the stage hardware enable and the EPS power permit remain
+// authoritative, so maintenance mode can never bypass an interlock, and the override cannot
+// stay active indefinitely.
+fbMaintPermit(
+    bRequest:=bMaintMode,
+    bInterlockOK:=stMotionStage.bHardwareEnable AND stMotionStage.stEPSPowerEnable.bEPS_OK,
+    tQualification:=tMaintQualification,
+    tMaxDuration:=tMaintMaxDuration);
+bMaintModeActive := fbMaintPermit.bActive;
+bMaintModeExpired := fbMaintPermit.bExpired;
+// Self-clear the request so the MAINT PV shows that the override is gone
+IF fbMaintPermit.bExpired THEN
+    bMaintMode := FALSE;
+END_IF
 
 // Initialize or reinitialize to the current state value
 rtBPTMDone(CLK:=bBPTMDone);
@@ -174,7 +219,7 @@ ELSE
     // If not transitioning, no need to wait for safety: immediately try to move and error if no auth
     stMotionStage.bSafetyReady := stMotionStage.bExecute;
     // Set an error message override in case this causes an error
-    IF stMotionStage.bError AND bArbiterEnabled AND NOT bMaintMode THEN
+    IF stMotionStage.bError AND bArbiterEnabled AND NOT bMaintModeActive THEN
         IF fReqPos > fActPos AND NOT bFwdOk THEN
             stMotionStage.sCustomErrorMessage := 'Unsafe tweak forward blocked by PMPS';
         ELSIF fReqPos < fActPos AND NOT bBwdOk THEN
@@ -183,7 +228,7 @@ ELSE
     END_IF
 END_IF
 
-IF bArbiterEnabled AND NOT bMaintMode THEN
+IF bArbiterEnabled AND NOT bMaintModeActive THEN
 // Only let us move if the transition is allowed, or if we are moving within a state's bounds
     mcPower(Axis:=stMotionStage.Axis,
             Enable:=stMotionStage.bAllEnable,
