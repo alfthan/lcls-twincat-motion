@@ -1,24 +1,59 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <TcPlcObject Version="1.1.0.1">
   <POU Name="FB_MotionClearAsserts_Test" Id="{f92faa2f-544b-4cb5-9f0d-b3d1a8e6ba98}" SpecialFunc="None">
-    <Declaration><![CDATA[FUNCTION_BLOCK FB_MotionClearAsserts_Test EXTENDS TcUnit.FB_TestSuite
+    <Declaration><![CDATA[(*
+    Unit tests for FB_MotionClearAsserts.
+
+    The block is a pure edge-triggered command: on the rising edge of bExecute it
+    removes every request this device owns from the arbiter pool, and it does
+    nothing at all on any other cycle. The cases below therefore come in two
+    flavours:
+
+    - Single cycle (TestBasic): one invocation with the execute input high is
+      enough to clear the whole pool.
+    - Multi cycle: the surrounding cycle is simulated step by step so that the
+      edge detector is exercised over time - no clear while the command is low, no
+      repeated clear while the command stays high, and a clear that is armed again
+      after the command falls and rises.
+
+    Usage: run through TcUnit, see PRG_TEST.
+
+    History:
+    - 2023-04-19, Z. Lentz: Original single-cycle TestBasic.
+    - 2026-11-27, Scirix agent: Added the cycle-by-cycle and single- versus
+      multi-cycle cases after an audit found the suite only invoked the block once.
+*)
+FUNCTION_BLOCK FB_MotionClearAsserts_Test EXTENDS TcUnit.FB_TestSuite
 VAR
 END_VAR
 ]]></Declaration>
     <Implementation>
       <ST><![CDATA[
+// Single cycle case: one invocation, the command is already asserted
 TestBasic();
+
+// Multi cycle cases: the surrounding cycle is stepped several times per case
+TestNoExecuteOverMultipleCycles();
+TestClearsOnRisingEdgeOnly();
+TestReExecuteClearsAgain();
 ]]></ST>
     </Implementation>
     <Method Name="TestBasic" Id="{2219d5cb-d17f-45f4-9105-eb6686b76151}">
       <Declaration><![CDATA[METHOD TestBasic
+(*
+    Single-cycle reference case.
+
+    One invocation with the execute input already TRUE clears the whole pool. This
+    is the baseline that the multi-cycle cases below are compared against: it
+    checks the immediate outcome only, without stepping any further cycle.
+*)
 VAR
-    nIter: UINT;
+    nIter: UINT; // Index into the state array, 0 = the transition state
 END_VAR
 VAR_INST
-    fbClear: FB_MotionClearAsserts;
-    astDbStateParams: ARRAY[0..GeneralConstants.MAX_STATES] OF ST_DbStateParams;
-    fbArbiter: FB_Arbiter(1);
+    fbClear: FB_MotionClearAsserts; // System under test
+    astDbStateParams: ARRAY[0..GeneralConstants.MAX_STATES] OF ST_DbStateParams; // State slots whose assertion IDs the block clears
+    fbArbiter: FB_Arbiter(1); // Arbiter holding the requests the block removes
 END_VAR
 ]]></Declaration>
       <Implementation>
@@ -52,6 +87,285 @@ FOR nIter := 0 TO GeneralConstants.MAX_STATES DO
         fbArbiter.CheckRequestInPool(100 + nIter),
         CONCAT(CONCAT('State ', UDINT_TO_STRING(nIter)), ' was not cleared from the pool'),
     );
+END_FOR
+
+TEST_FINISHED();
+]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="TestNoExecuteOverMultipleCycles" Id="{b2222222-0000-4000-8000-000000000001}">
+      <Declaration><![CDATA[METHOD PRIVATE TestNoExecuteOverMultipleCycles
+(*
+    Multi-cycle case, command never asserted.
+
+    Several cycles are advanced with the execute input FALSE. Nothing may be
+    removed on any of them, and because no rising edge was consumed the clear must
+    still be available for a later cycle.
+*)
+VAR
+    nIter: UINT; // Index into the state array, 0 = the transition state
+    nCycle: UINT; // Simulated PLC cycle number
+    bAllPresent: BOOL; // TRUE while every request is still in the pool in this cycle
+END_VAR
+VAR CONSTANT
+    cCycles: UINT := 5; // Cycles advanced with the command low
+END_VAR
+VAR_INST
+    fbClear: FB_MotionClearAsserts; // System under test
+    astDbStateParams: ARRAY[0..GeneralConstants.MAX_STATES] OF ST_DbStateParams; // State slots whose assertion IDs the block clears
+    fbArbiter: FB_Arbiter(1); // Arbiter holding the requests the block removes
+END_VAR
+]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[
+TEST('TestNoExecuteOverMultipleCycles');
+
+FOR nIter := 0 TO GeneralConstants.MAX_STATES DO
+    astDbStateParams[nIter].nRequestAssertionID := 100 + nIter;
+    fbArbiter.AddRequest(
+        nReqID:=100 + nIter,
+        stReqBP:=PMPS_GVL.cstFullBeam,
+        sDevName:='UnitTest',
+    );
+END_FOR
+
+// Step the surrounding cycle several times with the command held low.
+FOR nCycle := 1 TO cCycles DO
+    fbClear(
+        astDbStateParams:=astDbStateParams,
+        fbArbiter:=fbArbiter,
+        bExecute:=FALSE,
+    );
+
+    // Every cycle must leave the pool untouched: the clear is edge triggered.
+    bAllPresent := TRUE;
+    FOR nIter := 0 TO GeneralConstants.MAX_STATES DO
+        bAllPresent := bAllPresent AND fbArbiter.CheckRequestInPool(100 + nIter);
+    END_FOR
+    AssertTrue(
+        bAllPresent,
+        CONCAT(
+            CONCAT('Cycle ', UINT_TO_STRING(nCycle)),
+            ': requests were cleared without a rising execute edge',
+        ),
+    );
+END_FOR
+
+// The rising edge was never consumed, so the next assertion must still clear.
+fbClear(
+    astDbStateParams:=astDbStateParams,
+    fbArbiter:=fbArbiter,
+    bExecute:=TRUE,
+);
+
+FOR nIter := 0 TO GeneralConstants.MAX_STATES DO
+    AssertFalse(
+        fbArbiter.CheckRequestInPool(100 + nIter),
+        CONCAT(
+            CONCAT('State ', UINT_TO_STRING(nIter)),
+            ' was not cleared after the delayed rising edge',
+        ),
+    );
+END_FOR
+
+TEST_FINISHED();
+]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="TestClearsOnRisingEdgeOnly" Id="{b2222222-0000-4000-8000-000000000002}">
+      <Declaration><![CDATA[METHOD PRIVATE TestClearsOnRisingEdgeOnly
+(*
+    Multi-cycle case, command held asserted.
+
+    Cycle 1: execute low, nothing cleared.
+    Cycle 2: execute rises, the whole pool is cleared on that one cycle.
+    Then the requests are re-added while the execute input stays TRUE: an
+    edge-triggered block must not clear them again on the following cycles. This
+    is the case that distinguishes a single-cycle (edge) clear from a level-
+    triggered clear that would repeat every cycle.
+*)
+VAR
+    nIter: UINT; // Index into the state array, 0 = the transition state
+    nCycle: UINT; // Simulated PLC cycle number
+    bAllPresent: BOOL; // TRUE while every request is still in the pool in this cycle
+END_VAR
+VAR CONSTANT
+    cCycles: UINT := 3; // Cycles advanced with the command held high after the edge
+END_VAR
+VAR_INST
+    fbClear: FB_MotionClearAsserts; // System under test
+    astDbStateParams: ARRAY[0..GeneralConstants.MAX_STATES] OF ST_DbStateParams; // State slots whose assertion IDs the block clears
+    fbArbiter: FB_Arbiter(1); // Arbiter holding the requests the block removes
+END_VAR
+]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[
+TEST('TestClearsOnRisingEdgeOnly');
+
+FOR nIter := 0 TO GeneralConstants.MAX_STATES DO
+    astDbStateParams[nIter].nRequestAssertionID := 100 + nIter;
+    fbArbiter.AddRequest(
+        nReqID:=100 + nIter,
+        stReqBP:=PMPS_GVL.cstFullBeam,
+        sDevName:='UnitTest',
+    );
+END_FOR
+
+// Cycle 1: command low, nothing may be removed yet.
+fbClear(
+    astDbStateParams:=astDbStateParams,
+    fbArbiter:=fbArbiter,
+    bExecute:=FALSE,
+);
+FOR nIter := 0 TO GeneralConstants.MAX_STATES DO
+    AssertTrue(
+        fbArbiter.CheckRequestInPool(100 + nIter),
+        CONCAT(
+            CONCAT('State ', UINT_TO_STRING(nIter)),
+            ' was cleared before the rising execute edge',
+        ),
+    );
+END_FOR
+
+// Cycle 2: the rising edge clears everything this block owns.
+fbClear(
+    astDbStateParams:=astDbStateParams,
+    fbArbiter:=fbArbiter,
+    bExecute:=TRUE,
+);
+FOR nIter := 0 TO GeneralConstants.MAX_STATES DO
+    AssertFalse(
+        fbArbiter.CheckRequestInPool(100 + nIter),
+        CONCAT(
+            CONCAT('State ', UINT_TO_STRING(nIter)),
+            ' was not cleared on the rising execute edge',
+        ),
+    );
+END_FOR
+
+// Re-add the requests while the command is still held high.
+FOR nIter := 0 TO GeneralConstants.MAX_STATES DO
+    fbArbiter.AddRequest(
+        nReqID:=100 + nIter,
+        stReqBP:=PMPS_GVL.cstFullBeam,
+        sDevName:='UnitTest',
+    );
+END_FOR
+
+// Further cycles with the command still high must not clear them again.
+FOR nCycle := 1 TO cCycles DO
+    fbClear(
+        astDbStateParams:=astDbStateParams,
+        fbArbiter:=fbArbiter,
+        bExecute:=TRUE,
+    );
+
+    bAllPresent := TRUE;
+    FOR nIter := 0 TO GeneralConstants.MAX_STATES DO
+        bAllPresent := bAllPresent AND fbArbiter.CheckRequestInPool(100 + nIter);
+    END_FOR
+    AssertTrue(
+        bAllPresent,
+        CONCAT(
+            CONCAT('Cycle ', UINT_TO_STRING(nCycle)),
+            ': a held execute input cleared requests that were re-added after the edge',
+        ),
+    );
+END_FOR
+
+TEST_FINISHED();
+]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="TestReExecuteClearsAgain" Id="{b2222222-0000-4000-8000-000000000003}">
+      <Declaration><![CDATA[METHOD PRIVATE TestReExecuteClearsAgain
+(*
+    Multi-cycle case, command re-armed.
+
+    After a clear the execute input is held low for several cycles and the pool is
+    filled again; the next rising edge must clear it a second time. This pins down
+    that the edge detector re-arms across cycles instead of clearing only once for
+    the lifetime of the block.
+*)
+VAR
+    nIter: UINT; // Index into the state array, 0 = the transition state
+    nRound: UINT; // Test round, 1 = first clear, 2 = clear after re-arming
+    nCycle: UINT; // Simulated PLC cycle number
+END_VAR
+VAR CONSTANT
+    cCycles: UINT := 3; // Cycles advanced with the command held low to re-arm the edge
+END_VAR
+VAR_INST
+    fbClear: FB_MotionClearAsserts; // System under test
+    astDbStateParams: ARRAY[0..GeneralConstants.MAX_STATES] OF ST_DbStateParams; // State slots whose assertion IDs the block clears
+    fbArbiter: FB_Arbiter(1); // Arbiter holding the requests the block removes
+END_VAR
+]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[
+TEST('TestReExecuteClearsAgain');
+
+FOR nIter := 0 TO GeneralConstants.MAX_STATES DO
+    astDbStateParams[nIter].nRequestAssertionID := 100 + nIter;
+END_FOR
+
+FOR nRound := 1 TO 2 DO
+    // Fill the pool for this round.
+    FOR nIter := 0 TO GeneralConstants.MAX_STATES DO
+        fbArbiter.AddRequest(
+            nReqID:=100 + nIter,
+            stReqBP:=PMPS_GVL.cstFullBeam,
+            sDevName:='UnitTest',
+        );
+        AssertTrue(
+            fbArbiter.CheckRequestInPool(100 + nIter),
+            CONCAT(
+                CONCAT('Round ', UINT_TO_STRING(nRound)),
+                CONCAT(': state ', CONCAT(UINT_TO_STRING(nIter), ' should be in the pool')),
+            ),
+        );
+    END_FOR
+
+    // A low cycle must not clear anything on its own.
+    fbClear(
+        astDbStateParams:=astDbStateParams,
+        fbArbiter:=fbArbiter,
+        bExecute:=FALSE,
+    );
+    FOR nIter := 0 TO GeneralConstants.MAX_STATES DO
+        AssertTrue(
+            fbArbiter.CheckRequestInPool(100 + nIter),
+            CONCAT(
+                CONCAT('Round ', UINT_TO_STRING(nRound)),
+                ': a low execute input must not clear the pool',
+            ),
+        );
+    END_FOR
+
+    // The rising edge of this round must clear the pool again.
+    fbClear(
+        astDbStateParams:=astDbStateParams,
+        fbArbiter:=fbArbiter,
+        bExecute:=TRUE,
+    );
+    FOR nIter := 0 TO GeneralConstants.MAX_STATES DO
+        AssertFalse(
+            fbArbiter.CheckRequestInPool(100 + nIter),
+            CONCAT(
+                CONCAT('Round ', UINT_TO_STRING(nRound)),
+                ': the rising edge did not clear the pool - the edge detector did not re-arm',
+            ),
+        );
+    END_FOR
+
+    // Hold the command low for a few cycles so the next round has a fresh edge.
+    FOR nCycle := 1 TO cCycles DO
+        fbClear(
+            astDbStateParams:=astDbStateParams,
+            fbArbiter:=fbArbiter,
+            bExecute:=FALSE,
+        );
+    END_FOR
 END_FOR
 
 TEST_FINISHED();

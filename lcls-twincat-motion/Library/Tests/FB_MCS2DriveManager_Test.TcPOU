@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <TcPlcObject Version="1.1.0.1">
   <POU Name="FB_MCS2DriveManager_Test" Id="{c2f1a8d4-6e3b-4a90-9f12-7b5c0d4e2a31}" SpecialFunc="None">
     <Declaration><![CDATA[(*
@@ -7,30 +7,62 @@
     operating mode: a PV change switches the drive on demand, and a motion request
     writes the mode its action needs into the PV (so the readback stays consistent),
     with closed-loop (CSP) as the default.
+
+    The mode switch is a multi-cycle transition: the block asks the drive for the
+    new mode on the request cycle and only reports the switch once the drive
+    readback shows the new mode. Every case below therefore steps the surrounding
+    cycle explicitly (nCycle) instead of invoking the block once, and the two
+    "multi cycle" cases at the end separate what a single invocation can and cannot
+    show from what only a later cycle can show.
+
+    History:
+    - 2026-05-26: Initial single-cycle cases for the operating-mode PV.
+    - 2026-11-27, Scirix agent: Step the cycle in every case, check the per-cycle
+      state, fix the STEP expectation, and add the single- versus multi-cycle
+      transition cases after an audit found the suite only invoked the block once.
 *)
 FUNCTION_BLOCK FB_MCS2DriveManager_Test EXTENDS TcUnit.FB_TestSuite
 VAR
 END_VAR
 ]]></Declaration>
     <Implementation>
-      <ST><![CDATA[TestPvRequestSwitchesToStep();
+      <ST><![CDATA[
+// Single cycle cases: the request edge and its immediate effect
+TestPvRequestSwitchesToStep();
 TestPvRequestSwitchesToCalibration();
 TestStepCmdSelectsStepMode();
 TestMoveCmdSelectsClosedLoop();
 TestDefaultIsClosedLoop();
+
+// Multi cycle cases: the switch only completes once the drive readback catches up
+TestCalibrationSwitchCompletesOverMultipleCycles();
+TestSwitchRekeysWhilePendingAcrossCycles();
 ]]></ST>
     </Implementation>
     <Method Name="TestDefaultIsClosedLoop" Id="{a1111111-0000-4000-8000-000000000001}">
       <Declaration><![CDATA[METHOD PRIVATE TestDefaultIsClosedLoop
+(*
+    Steady state, no request at all.
+
+    With the untouched default PV the block must report closed-loop mode on every
+    cycle it is invoked, keep both manual modes off and never report a transition.
+*)
+VAR
+    nCycle : UINT; // Simulated PLC cycle number
+END_VAR
+VAR CONSTANT
+    cCycles : UINT := 5; // Cycles to advance before the final assertion
+END_VAR
 VAR_INST
-    fbSut : FB_MCS2DriveManager;
-    stMotionStage : ST_MotionStage;
-    stChan : ST_MCS2ChanParameter;
-    stDrive : ST_DS402Drive;
+    fbSut : FB_MCS2DriveManager; // System under test
+    stMotionStage : ST_MotionStage; // Motion stage interface of the block
+    stChan : ST_MCS2ChanParameter; // MCS2 channel parameters, holds the mode PV
+    stDrive : ST_DS402Drive; // DS402 drive interface (status in, commands out)
 END_VAR
 ]]></Declaration>
       <Implementation>
-        <ST><![CDATA[TEST(__POUNAME());
+        <ST><![CDATA[
+TEST(__POUNAME());
 
 // Operational drive already displaying CSP, with the default (untouched) PV.
 stDrive.stDriveStatus.ReadyToSwitchOn := TRUE;
@@ -42,19 +74,29 @@ stDrive.stDriveStatus.Fault := FALSE;
 stDrive.stDriveStatus.SwitchOnDisabled := FALSE;
 stDrive.nModeOfOperationDisplay := E_MCS2OpMode.CSP;
 
-fbSut(
-    bUserExec := FALSE,
-    bStartupActive := FALSE,
-    stMotionStage := stMotionStage,
-    stMCS2ChanParameter := stChan,
-    stDS402Drive := stDrive
-);
+// Advance several cycles: with no request, nothing may change on any of them.
+FOR nCycle := 1 TO cCycles DO
+    fbSut(
+        bUserExec := FALSE,
+        bStartupActive := FALSE,
+        stMotionStage := stMotionStage,
+        stMCS2ChanParameter := stChan,
+        stDS402Drive := stDrive
+    );
 
-// PV defaults to closed loop and nothing should switch us into a manual mode.
-AssertTrue(stChan.eOpModeReq = E_MCS2OpModeReq.CLOSED_LOOP, 'PV should default to CLOSED_LOOP');
-AssertTrue(fbSut.bCSPModeEnabled, 'CSP mode should be enabled by default when operational');
-AssertFalse(fbSut.bStepModeEnabled, 'Step mode must not be enabled by default');
-AssertFalse(fbSut.bCalibrationModeEnabled, 'Calibration mode must not be enabled by default');
+    // PV defaults to closed loop and nothing should switch us into a manual mode.
+    AssertTrue(stChan.eOpModeReq = E_MCS2OpModeReq.CLOSED_LOOP, 'PV should default to CLOSED_LOOP');
+    AssertTrue(fbSut.bCSPModeEnabled, 'CSP mode should be enabled by default when operational');
+    AssertFalse(fbSut.bStepModeEnabled, 'Step mode must not be enabled by default');
+    AssertFalse(fbSut.bCalibrationModeEnabled, 'Calibration mode must not be enabled by default');
+    AssertFalse(
+        fbSut.bManualTransition,
+        CONCAT(
+            CONCAT('Cycle ', UINT_TO_STRING(nCycle)),
+            ': no mode switch was requested, so none may be reported',
+        ),
+    );
+END_FOR
 
 TEST_FINISHED();
 ]]></ST>
@@ -62,34 +104,61 @@ TEST_FINISHED();
     </Method>
     <Method Name="TestMoveCmdSelectsClosedLoop" Id="{a1111111-0000-4000-8000-000000000002}">
       <Declaration><![CDATA[METHOD PRIVATE TestMoveCmdSelectsClosedLoop
+(*
+    A closed-loop move request is held for several cycles: the PV is written to
+    CLOSED_LOOP and the drive is kept in CSP on every one of them, i.e. the request
+    does not oscillate between cycles while it stays asserted.
+*)
+VAR
+    nCycle : UINT; // Simulated PLC cycle number
+END_VAR
+VAR CONSTANT
+    cCycles : UINT := 3; // Cycles to hold the move request for
+END_VAR
 VAR_INST
-    fbSut : FB_MCS2DriveManager;
-    stMotionStage : ST_MotionStage;
-    stChan : ST_MCS2ChanParameter;
-    stDrive : ST_DS402Drive;
+    fbSut : FB_MCS2DriveManager; // System under test
+    stMotionStage : ST_MotionStage; // Motion stage interface of the block
+    stChan : ST_MCS2ChanParameter; // MCS2 channel parameters, holds the mode PV
+    stDrive : ST_DS402Drive; // DS402 drive interface (status in, commands out)
 END_VAR
 ]]></Declaration>
       <Implementation>
-        <ST><![CDATA[TEST(__POUNAME());
+        <ST><![CDATA[
+TEST(__POUNAME());
 
-// Drive currently in step mode; the PV says STEP.
-stChan.eOpModeReq := E_MCS2OpModeReq.STEP;
+// Operational drive currently in step mode, and the PV says STEP.
+stDrive.stDriveStatus.ReadyToSwitchOn := TRUE;
+stDrive.stDriveStatus.SwitchedOn := TRUE;
+stDrive.stDriveStatus.OperationEnabled := TRUE;
+stDrive.stDriveStatus.VoltageEnabled := TRUE;
+stDrive.stDriveStatus.QuickStopActive := TRUE;
+stDrive.stDriveStatus.Fault := FALSE;
+stDrive.stDriveStatus.SwitchOnDisabled := FALSE;
 stDrive.nModeOfOperationDisplay := E_MCS2OpMode.STEP;
+stChan.eOpModeReq := E_MCS2OpModeReq.STEP;
 
-// A closed-loop move request arrives.
+// A closed-loop move request arrives and stays asserted.
 stMotionStage.bMoveCmd := TRUE;
 
-fbSut(
-    bUserExec := TRUE,
-    bStartupActive := FALSE,
-    stMotionStage := stMotionStage,
-    stMCS2ChanParameter := stChan,
-    stDS402Drive := stDrive
-);
+FOR nCycle := 1 TO cCycles DO
+    fbSut(
+        bUserExec := TRUE,
+        bStartupActive := FALSE,
+        stMotionStage := stMotionStage,
+        stMCS2ChanParameter := stChan,
+        stDS402Drive := stDrive
+    );
 
-// The move request overwrites the PV with CLOSED_LOOP and switches the drive to CSP.
-AssertTrue(stChan.eOpModeReq = E_MCS2OpModeReq.CLOSED_LOOP, 'Move request should select CLOSED_LOOP in the PV');
-AssertTrue(stDrive.nModeOfOperation = E_MCS2OpMode.CSP, 'Drive should be switched to CSP for a closed-loop move');
+    // The move request overwrites the PV with CLOSED_LOOP and switches the drive to CSP.
+    AssertTrue(stChan.eOpModeReq = E_MCS2OpModeReq.CLOSED_LOOP, 'Move request should select CLOSED_LOOP in the PV');
+    AssertTrue(
+        stDrive.nModeOfOperation = E_MCS2OpMode.CSP,
+        CONCAT(
+            CONCAT('Cycle ', UINT_TO_STRING(nCycle)),
+            ': drive should be switched to CSP for a closed-loop move',
+        ),
+    );
+END_FOR
 
 TEST_FINISHED();
 ]]></ST>
@@ -97,20 +166,44 @@ TEST_FINISHED();
     </Method>
     <Method Name="TestPvRequestSwitchesToCalibration" Id="{a1111111-0000-4000-8000-000000000003}">
       <Declaration><![CDATA[METHOD PRIVATE TestPvRequestSwitchesToCalibration
+(*
+    A user PV change to CALIBRATION with no motion request.
+
+    Single cycle: the PV change alone drives the DS402 mode to calibration already
+    on the cycle it is noticed. Multi cycle: the request stays latched, so later
+    cycles must neither drop the mode write nor report the switch before the drive
+    readback shows calibration.
+*)
+VAR
+    nCycle : UINT; // Simulated PLC cycle number
+END_VAR
+VAR CONSTANT
+    cCycles : UINT := 3; // Cycles to advance while the drive readback lags
+END_VAR
 VAR_INST
-    fbSut : FB_MCS2DriveManager;
-    stMotionStage : ST_MotionStage;
-    stChan : ST_MCS2ChanParameter;
-    stDrive : ST_DS402Drive;
+    fbSut : FB_MCS2DriveManager; // System under test
+    stMotionStage : ST_MotionStage; // Motion stage interface of the block
+    stChan : ST_MCS2ChanParameter; // MCS2 channel parameters, holds the mode PV
+    stDrive : ST_DS402Drive; // DS402 drive interface (status in, commands out)
 END_VAR
 ]]></Declaration>
       <Implementation>
-        <ST><![CDATA[TEST(__POUNAME());
+        <ST><![CDATA[
+TEST(__POUNAME());
 
-// Drive displaying CSP; user sets the mode PV to CALIBRATION (no motion request).
+// Operational drive displaying CSP; user sets the mode PV to CALIBRATION
+// (no motion request).
+stDrive.stDriveStatus.ReadyToSwitchOn := TRUE;
+stDrive.stDriveStatus.SwitchedOn := TRUE;
+stDrive.stDriveStatus.OperationEnabled := TRUE;
+stDrive.stDriveStatus.VoltageEnabled := TRUE;
+stDrive.stDriveStatus.QuickStopActive := TRUE;
+stDrive.stDriveStatus.Fault := FALSE;
+stDrive.stDriveStatus.SwitchOnDisabled := FALSE;
 stDrive.nModeOfOperationDisplay := E_MCS2OpMode.CSP;
 stChan.eOpModeReq := E_MCS2OpModeReq.CALIBRATION;
 
+// Cycle 1: the PV change alone must drive the DS402 mode to calibration.
 fbSut(
     bUserExec := FALSE,
     bStartupActive := FALSE,
@@ -119,8 +212,44 @@ fbSut(
     stDS402Drive := stDrive
 );
 
-// The PV change alone must drive the DS402 mode to calibration.
+AssertTrue(fbSut.eRequestedManualMode = E_MCS2OpMode.CALIBRATE, 'PV CALIBRATION should be mapped to MCS2_CALIBRATION');
 AssertTrue(stDrive.nModeOfOperation = E_MCS2OpMode.CALIBRATE, 'PV CALIBRATION should switch drive to MCS2_CALIBRATION');
+AssertFalse(fbSut.bCalibrationModeEnabled, 'The drive does not report calibration on the request cycle yet');
+AssertFalse(fbSut.bManualTransition, 'The switch cannot be complete before the drive reports the new mode');
+
+// Later cycles: the request is latched, so the mode write must survive and no
+// transition may be reported while the drive still displays CSP.
+FOR nCycle := 1 TO cCycles DO
+    fbSut(
+        bUserExec := FALSE,
+        bStartupActive := FALSE,
+        stMotionStage := stMotionStage,
+        stMCS2ChanParameter := stChan,
+        stDS402Drive := stDrive
+    );
+
+    AssertTrue(
+        stDrive.nModeOfOperation = E_MCS2OpMode.CALIBRATE,
+        CONCAT(
+            CONCAT('Cycle ', UINT_TO_STRING(nCycle)),
+            ': the calibration request must stay written to the drive',
+        ),
+    );
+    AssertFalse(
+        fbSut.bCalibrationModeEnabled,
+        CONCAT(
+            CONCAT('Cycle ', UINT_TO_STRING(nCycle)),
+            ': the drive still displays CSP, so calibration cannot be enabled',
+        ),
+    );
+    AssertFalse(
+        fbSut.bManualTransition,
+        CONCAT(
+            CONCAT('Cycle ', UINT_TO_STRING(nCycle)),
+            ': the switch was reported before the drive showed the new mode',
+        ),
+    );
+END_FOR
 
 TEST_FINISHED();
 ]]></ST>
@@ -128,20 +257,42 @@ TEST_FINISHED();
     </Method>
     <Method Name="TestPvRequestSwitchesToStep" Id="{a1111111-0000-4000-8000-000000000004}">
       <Declaration><![CDATA[METHOD PRIVATE TestPvRequestSwitchesToStep
+(*
+    A user PV change to STEP with no motion request.
+
+    Same shape as the calibration case: the PV change writes the open-loop step
+    mode on the request cycle and the request stays latched over the cycles that
+    follow, while the drive readback still displays CSP.
+*)
+VAR
+    nCycle : UINT; // Simulated PLC cycle number
+END_VAR
+VAR CONSTANT
+    cCycles : UINT := 3; // Cycles to advance while the drive readback lags
+END_VAR
 VAR_INST
-    fbSut : FB_MCS2DriveManager;
-    stMotionStage : ST_MotionStage;
-    stChan : ST_MCS2ChanParameter;
-    stDrive : ST_DS402Drive;
+    fbSut : FB_MCS2DriveManager; // System under test
+    stMotionStage : ST_MotionStage; // Motion stage interface of the block
+    stChan : ST_MCS2ChanParameter; // MCS2 channel parameters, holds the mode PV
+    stDrive : ST_DS402Drive; // DS402 drive interface (status in, commands out)
 END_VAR
 ]]></Declaration>
       <Implementation>
-        <ST><![CDATA[TEST(__POUNAME());
+        <ST><![CDATA[
+TEST(__POUNAME());
 
-// Drive displaying CSP; user sets the mode PV to STEP (no motion request).
+// Operational drive displaying CSP; user sets the mode PV to STEP (no motion request).
+stDrive.stDriveStatus.ReadyToSwitchOn := TRUE;
+stDrive.stDriveStatus.SwitchedOn := TRUE;
+stDrive.stDriveStatus.OperationEnabled := TRUE;
+stDrive.stDriveStatus.VoltageEnabled := TRUE;
+stDrive.stDriveStatus.QuickStopActive := TRUE;
+stDrive.stDriveStatus.Fault := FALSE;
+stDrive.stDriveStatus.SwitchOnDisabled := FALSE;
 stDrive.nModeOfOperationDisplay := E_MCS2OpMode.CSP;
 stChan.eOpModeReq := E_MCS2OpModeReq.STEP;
 
+// Cycle 1: the PV change alone must drive the DS402 mode to open-loop step mode.
 fbSut(
     bUserExec := FALSE,
     bStartupActive := FALSE,
@@ -150,8 +301,37 @@ fbSut(
     stDS402Drive := stDrive
 );
 
-// The PV change alone must drive the DS402 mode to open-loop step mode.
-AssertTrue(stDrive.nModeOfOperation = E_MCS2OpMode.CALIBRATE, 'PV STEP should switch drive to MCS2_OL_STEP_MODE');
+AssertTrue(fbSut.eRequestedManualMode = E_MCS2OpMode.STEP, 'PV STEP should be mapped to MCS2_OL_STEP_MODE');
+AssertTrue(stDrive.nModeOfOperation = E_MCS2OpMode.STEP, 'PV STEP should switch drive to MCS2_OL_STEP_MODE');
+AssertFalse(fbSut.bStepModeEnabled, 'The drive does not report step mode on the request cycle yet');
+
+// Later cycles: the step request stays latched even though the drive still
+// displays CSP, and no transition may be reported yet.
+FOR nCycle := 1 TO cCycles DO
+    fbSut(
+        bUserExec := FALSE,
+        bStartupActive := FALSE,
+        stMotionStage := stMotionStage,
+        stMCS2ChanParameter := stChan,
+        stDS402Drive := stDrive
+    );
+
+    AssertTrue(stChan.eOpModeReq = E_MCS2OpModeReq.STEP, 'The step request must stay in the PV');
+    AssertTrue(
+        stDrive.nModeOfOperation = E_MCS2OpMode.STEP,
+        CONCAT(
+            CONCAT('Cycle ', UINT_TO_STRING(nCycle)),
+            ': the step request must stay written to the drive',
+        ),
+    );
+    AssertFalse(
+        fbSut.bStepModeEnabled,
+        CONCAT(
+            CONCAT('Cycle ', UINT_TO_STRING(nCycle)),
+            ': the drive still displays CSP, so step mode cannot be enabled',
+        ),
+    );
+END_FOR
 
 TEST_FINISHED();
 ]]></ST>
@@ -159,22 +339,74 @@ TEST_FINISHED();
     </Method>
     <Method Name="TestStepCmdSelectsStepMode" Id="{a1111111-0000-4000-8000-000000000005}">
       <Declaration><![CDATA[METHOD PRIVATE TestStepCmdSelectsStepMode
+(*
+    A step move request held over several cycles.
+
+    While the drive readback lags, the request writes STEP into the PV and into the
+    drive mode on every cycle but no manual mode is reported. Once the drive
+    reports STEP the block enables step mode, and releasing the request afterwards
+    must not undo the selected mode.
+*)
+VAR
+    nCycle : UINT; // Simulated PLC cycle number
+END_VAR
+VAR CONSTANT
+    cCycles : UINT := 3; // Cycles to hold the request / the released state for
+END_VAR
 VAR_INST
-    fbSut : FB_MCS2DriveManager;
-    stMotionStage : ST_MotionStage;
-    stChan : ST_MCS2ChanParameter;
-    stDrive : ST_DS402Drive;
+    fbSut : FB_MCS2DriveManager; // System under test
+    stMotionStage : ST_MotionStage; // Motion stage interface of the block
+    stChan : ST_MCS2ChanParameter; // MCS2 channel parameters, holds the mode PV
+    stDrive : ST_DS402Drive; // DS402 drive interface (status in, commands out)
 END_VAR
 ]]></Declaration>
       <Implementation>
-        <ST><![CDATA[TEST(__POUNAME());
+        <ST><![CDATA[
+TEST(__POUNAME());
 
-// Drive displaying CSP, PV at its default closed-loop value.
+// Operational drive displaying CSP, PV at its default closed-loop value.
+stDrive.stDriveStatus.ReadyToSwitchOn := TRUE;
+stDrive.stDriveStatus.SwitchedOn := TRUE;
+stDrive.stDriveStatus.OperationEnabled := TRUE;
+stDrive.stDriveStatus.VoltageEnabled := TRUE;
+stDrive.stDriveStatus.QuickStopActive := TRUE;
+stDrive.stDriveStatus.Fault := FALSE;
+stDrive.stDriveStatus.SwitchOnDisabled := FALSE;
 stDrive.nModeOfOperationDisplay := E_MCS2OpMode.CSP;
 
-// A step move request arrives.
+// A step move request arrives and stays asserted.
 stChan.bStepMoveCmd := TRUE;
 
+// The step request writes STEP into the PV and switches the drive, but the drive
+// readback lags, so step mode cannot be reported on these cycles.
+FOR nCycle := 1 TO cCycles DO
+    fbSut(
+        bUserExec := TRUE,
+        bStartupActive := FALSE,
+        stMotionStage := stMotionStage,
+        stMCS2ChanParameter := stChan,
+        stDS402Drive := stDrive
+    );
+
+    AssertTrue(stChan.eOpModeReq = E_MCS2OpModeReq.STEP, 'Step request should select STEP in the PV');
+    AssertTrue(
+        stDrive.nModeOfOperation = E_MCS2OpMode.STEP,
+        CONCAT(
+            CONCAT('Cycle ', UINT_TO_STRING(nCycle)),
+            ': step request should switch drive to MCS2_OL_STEP_MODE',
+        ),
+    );
+    AssertFalse(
+        fbSut.bStepModeEnabled,
+        CONCAT(
+            CONCAT('Cycle ', UINT_TO_STRING(nCycle)),
+            ': the drive does not report step mode yet',
+        ),
+    );
+END_FOR
+
+// The drive now reports STEP: the mode flags must follow on this later cycle.
+stDrive.nModeOfOperationDisplay := E_MCS2OpMode.STEP;
 fbSut(
     bUserExec := TRUE,
     bStartupActive := FALSE,
@@ -183,9 +415,271 @@ fbSut(
     stDS402Drive := stDrive
 );
 
-// The step request writes STEP into the PV and switches the drive into step mode.
-AssertTrue(stChan.eOpModeReq = E_MCS2OpModeReq.STEP, 'Step request should select STEP in the PV');
-AssertTrue(stDrive.nModeOfOperation = E_MCS2OpMode.STEP, 'Step request should switch drive to MCS2_OL_STEP_MODE');
+AssertTrue(fbSut.eRequestedManualMode = E_MCS2OpMode.STEP, 'Requested mode should be open-loop step');
+AssertTrue(fbSut.bStepModeEnabled, 'Drive reporting STEP should enable step mode');
+AssertFalse(fbSut.bCSPModeEnabled, 'CSP mode must not be enabled while the drive reports STEP');
+
+// Releasing the request must not undo the selected mode: the PV keeps STEP and
+// step mode stays enabled.
+stChan.bStepMoveCmd := FALSE;
+FOR nCycle := 1 TO cCycles DO
+    fbSut(
+        bUserExec := FALSE,
+        bStartupActive := FALSE,
+        stMotionStage := stMotionStage,
+        stMCS2ChanParameter := stChan,
+        stDS402Drive := stDrive
+    );
+
+    AssertTrue(
+        stChan.eOpModeReq = E_MCS2OpModeReq.STEP,
+        CONCAT(
+            CONCAT('Cycle ', UINT_TO_STRING(nCycle)),
+            ': the selected mode must survive the end of the request',
+        ),
+    );
+    AssertTrue(
+        fbSut.bStepModeEnabled,
+        CONCAT(
+            CONCAT('Cycle ', UINT_TO_STRING(nCycle)),
+            ': the drive still reports STEP, so step mode must stay enabled',
+        ),
+    );
+END_FOR
+
+TEST_FINISHED();
+]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="TestCalibrationSwitchCompletesOverMultipleCycles" Id="{a1111111-0000-4000-8000-000000000006}">
+      <Declaration><![CDATA[METHOD PRIVATE TestCalibrationSwitchCompletesOverMultipleCycles
+(*
+    Single- versus multi-cycle behaviour of a user-requested manual mode switch.
+
+    The switch cannot complete on the cycle the request is made in: the block first
+    asks the drive for the new mode, and only once the drive readback reports that
+    mode on a later cycle is the switch reported. This case pins both steps down:
+    the request cycle must leave the switch pending and must not report a
+    transition, the following lagging cycles must still not report one, and the
+    cycle on which the readback catches up must report it and keep reporting it.
+*)
+VAR
+    nCycle : UINT; // Simulated PLC cycle number
+END_VAR
+VAR CONSTANT
+    cCycles : UINT := 3; // Cycles to advance while the drive readback lags / after it catches up
+END_VAR
+VAR_INST
+    fbSut : FB_MCS2DriveManager; // System under test
+    stMotionStage : ST_MotionStage; // Motion stage interface of the block
+    stChan : ST_MCS2ChanParameter; // MCS2 channel parameters, holds the mode PV
+    stDrive : ST_DS402Drive; // DS402 drive interface (status in, commands out)
+END_VAR
+]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[
+TEST(__POUNAME());
+
+// Operational drive displaying CSP; the user asks for CALIBRATION.
+stDrive.stDriveStatus.ReadyToSwitchOn := TRUE;
+stDrive.stDriveStatus.SwitchedOn := TRUE;
+stDrive.stDriveStatus.OperationEnabled := TRUE;
+stDrive.stDriveStatus.VoltageEnabled := TRUE;
+stDrive.stDriveStatus.QuickStopActive := TRUE;
+stDrive.stDriveStatus.Fault := FALSE;
+stDrive.stDriveStatus.SwitchOnDisabled := FALSE;
+stDrive.nModeOfOperationDisplay := E_MCS2OpMode.CSP;
+stChan.eOpModeReq := E_MCS2OpModeReq.CALIBRATION;
+
+// Cycle 1: the request is turned into a drive mode write, but the drive still
+// reports CSP, so the switch may not be reported yet.
+fbSut(
+    bUserExec := FALSE,
+    bStartupActive := FALSE,
+    stMotionStage := stMotionStage,
+    stMCS2ChanParameter := stChan,
+    stDS402Drive := stDrive
+);
+
+AssertTrue(stDrive.nModeOfOperation = E_MCS2OpMode.CALIBRATE, 'Request cycle should write CALIBRATE to the drive');
+AssertFalse(fbSut.bManualTransition, 'Cycle 1 cannot report the switch: the drive still reports CSP');
+AssertFalse(fbSut.bCalibrationModeEnabled, 'Cycle 1: the drive does not report calibration yet');
+
+// Cycles 2..: the drive readback has still not caught up, so the switch must stay
+// pending and the mode write must not be lost.
+FOR nCycle := 1 TO cCycles DO
+    fbSut(
+        bUserExec := FALSE,
+        bStartupActive := FALSE,
+        stMotionStage := stMotionStage,
+        stMCS2ChanParameter := stChan,
+        stDS402Drive := stDrive
+    );
+
+    AssertFalse(
+        fbSut.bManualTransition,
+        CONCAT(
+            CONCAT('Cycle ', UINT_TO_STRING(nCycle)),
+            ': the switch was reported before the drive showed the new mode',
+        ),
+    );
+    AssertTrue(
+        stDrive.nModeOfOperation = E_MCS2OpMode.CALIBRATE,
+        CONCAT(
+            CONCAT('Cycle ', UINT_TO_STRING(nCycle)),
+            ': the pending switch must not drop the mode write',
+        ),
+    );
+END_FOR
+
+// The drive finally reports CALIBRATE: the switch completes on this later cycle.
+stDrive.nModeOfOperationDisplay := E_MCS2OpMode.CALIBRATE;
+fbSut(
+    bUserExec := FALSE,
+    bStartupActive := FALSE,
+    stMotionStage := stMotionStage,
+    stMCS2ChanParameter := stChan,
+    stDS402Drive := stDrive
+);
+
+AssertTrue(fbSut.bManualTransition, 'The switch should complete once the drive reports the requested mode');
+AssertTrue(fbSut.bCalibrationModeEnabled, 'A drive in calibration mode should enable the calibration flag');
+AssertFalse(fbSut.bCSPModeEnabled, 'Closed loop must not stay enabled in calibration mode');
+
+// ...and the completed switch must stay reported on the cycles that follow.
+FOR nCycle := 1 TO cCycles DO
+    fbSut(
+        bUserExec := FALSE,
+        bStartupActive := FALSE,
+        stMotionStage := stMotionStage,
+        stMCS2ChanParameter := stChan,
+        stDS402Drive := stDrive
+    );
+
+    AssertTrue(
+        fbSut.bManualTransition,
+        CONCAT(
+            CONCAT('Cycle ', UINT_TO_STRING(nCycle)),
+            ': the completed switch must stay reported',
+        ),
+    );
+    AssertTrue(
+        fbSut.bCalibrationModeEnabled,
+        CONCAT(
+            CONCAT('Cycle ', UINT_TO_STRING(nCycle)),
+            ': the drive still reports calibration, so the flag must stay set',
+        ),
+    );
+END_FOR
+
+TEST_FINISHED();
+]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="TestSwitchRekeysWhilePendingAcrossCycles" Id="{a1111111-0000-4000-8000-000000000007}">
+      <Declaration><![CDATA[METHOD PRIVATE TestSwitchRekeysWhilePendingAcrossCycles
+(*
+    A second mode request while the first switch is still pending.
+
+    The user asks for CALIBRATION, and before the drive readback catches up changes
+    the PV to STEP. The newer request must take over across the following cycles:
+    the drive mode is rewritten to STEP, still nothing is reported as a transition
+    while the drive lags, and the switch completes on the cycle the drive reports
+    STEP.
+*)
+VAR
+    nCycle : UINT; // Simulated PLC cycle number
+END_VAR
+VAR CONSTANT
+    cCycles : UINT := 2; // Cycles to advance between the two requests
+END_VAR
+VAR_INST
+    fbSut : FB_MCS2DriveManager; // System under test
+    stMotionStage : ST_MotionStage; // Motion stage interface of the block
+    stChan : ST_MCS2ChanParameter; // MCS2 channel parameters, holds the mode PV
+    stDrive : ST_DS402Drive; // DS402 drive interface (status in, commands out)
+END_VAR
+]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[
+TEST(__POUNAME());
+
+// Operational drive displaying CSP; first the user asks for CALIBRATION.
+stDrive.stDriveStatus.ReadyToSwitchOn := TRUE;
+stDrive.stDriveStatus.SwitchedOn := TRUE;
+stDrive.stDriveStatus.OperationEnabled := TRUE;
+stDrive.stDriveStatus.VoltageEnabled := TRUE;
+stDrive.stDriveStatus.QuickStopActive := TRUE;
+stDrive.stDriveStatus.Fault := FALSE;
+stDrive.stDriveStatus.SwitchOnDisabled := FALSE;
+stDrive.nModeOfOperationDisplay := E_MCS2OpMode.CSP;
+stChan.eOpModeReq := E_MCS2OpModeReq.CALIBRATION;
+
+// Cycle 1: the calibration request is written to the drive and left pending.
+fbSut(
+    bUserExec := FALSE,
+    bStartupActive := FALSE,
+    stMotionStage := stMotionStage,
+    stMCS2ChanParameter := stChan,
+    stDS402Drive := stDrive
+);
+
+AssertTrue(stDrive.nModeOfOperation = E_MCS2OpMode.CALIBRATE, 'First request should write CALIBRATE to the drive');
+AssertFalse(fbSut.bManualTransition, 'Cycle 1 cannot report the switch: the drive still reports CSP');
+
+// Cycle 2: the user changes the PV to STEP while the first switch is pending.
+stChan.eOpModeReq := E_MCS2OpModeReq.STEP;
+fbSut(
+    bUserExec := FALSE,
+    bStartupActive := FALSE,
+    stMotionStage := stMotionStage,
+    stMCS2ChanParameter := stChan,
+    stDS402Drive := stDrive
+);
+
+AssertTrue(fbSut.eRequestedManualMode = E_MCS2OpMode.STEP, 'The newer request should replace the requested mode');
+AssertTrue(stDrive.nModeOfOperation = E_MCS2OpMode.STEP, 'The newer request should overwrite the drive mode with STEP');
+AssertFalse(fbSut.bManualTransition, 'The re-keyed switch is still pending: the drive lags behind');
+
+// Further cycles with the drive still displaying CSP: the pending switch must not
+// be abandoned and must not be reported early.
+FOR nCycle := 1 TO cCycles DO
+    fbSut(
+        bUserExec := FALSE,
+        bStartupActive := FALSE,
+        stMotionStage := stMotionStage,
+        stMCS2ChanParameter := stChan,
+        stDS402Drive := stDrive
+    );
+
+    AssertTrue(
+        stDrive.nModeOfOperation = E_MCS2OpMode.STEP,
+        CONCAT(
+            CONCAT('Cycle ', UINT_TO_STRING(nCycle)),
+            ': the re-keyed request must stay written to the drive',
+        ),
+    );
+    AssertFalse(
+        fbSut.bManualTransition,
+        CONCAT(
+            CONCAT('Cycle ', UINT_TO_STRING(nCycle)),
+            ': the switch was reported before the drive showed STEP',
+        ),
+    );
+END_FOR
+
+// The drive reports STEP: the re-keyed switch completes here.
+stDrive.nModeOfOperationDisplay := E_MCS2OpMode.STEP;
+fbSut(
+    bUserExec := FALSE,
+    bStartupActive := FALSE,
+    stMotionStage := stMotionStage,
+    stMCS2ChanParameter := stChan,
+    stDS402Drive := stDrive
+);
+
+AssertTrue(fbSut.bManualTransition, 'The re-keyed switch should complete once the drive reports STEP');
+AssertTrue(fbSut.bStepModeEnabled, 'A drive in step mode should enable the step flag');
 
 TEST_FINISHED();
 ]]></ST>
