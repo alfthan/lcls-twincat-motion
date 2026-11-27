@@ -257,6 +257,7 @@ STRUCT
     '}
     fCurrentBacklash: LREAL;
 
+    // TRUE once the saved position has been restored to fPosition at startup
     bRestoreDone : BOOL;
 END_STRUCT
 END_TYPE
