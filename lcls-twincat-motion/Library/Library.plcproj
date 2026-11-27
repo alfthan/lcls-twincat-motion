@@ -219,6 +219,9 @@
     <Compile Include="DUTs\ST_StatePMPSPlcToEpics.TcDUT">
       <SubType>Code</SubType>
     </Compile>
+    <Compile Include="GVLs\BitWidthConstants.TcGVL">
+      <SubType>Code</SubType>
+    </Compile>
     <Compile Include="GVLs\MOTION_GVL.TcGVL">
       <SubType>Code</SubType>
       <LinkAlways>true</LinkAlways>

@@ -6,6 +6,10 @@
     Create a JSON doc in memory to match the input structs
     Assumes 1 device for simplicity
     Writes to the global pmps json doc
+
+    The bitmask widths serialized for neVRange and nBeamClassRange are the
+    named constants BitWidthConstants.PMPS_EVRANGE_BITS and
+    BitWidthConstants.PMPS_BCRANGE_BITS.
 *)
 VAR_IN_OUT
     astBeamParams: ARRAY[*] OF ST_DbStateParams;
@@ -55,7 +59,7 @@ FOR nIter := LOWER_BOUND(astBeamParams, 1) TO UPPER_BOUND(astBeamParams, 1) DO
         member:='beamline',
         value:='tst',
     );
-    aseVRange[nIter] := bitmaskToString(astBeamParams[nIter].stBeamParams.neVRange, 32);
+    aseVRange[nIter] := bitmaskToString(astBeamParams[nIter].stBeamParams.neVRange, BitWidthConstants.PMPS_EVRANGE_BITS);
     fbJson.AddStringMember(
         v:=ajsonState[nIter],
         member:='neVRange',
@@ -97,7 +101,7 @@ FOR nIter := LOWER_BOUND(astBeamParams, 1) TO UPPER_BOUND(astBeamParams, 1) DO
         member:='reactive_pressure',
         value:='',
     );
-    asBCRange[nIter] := bitmaskToString(astBeamParams[nIter].stBeamParams.nBCRange, 15);
+    asBCRange[nIter] := bitmaskToString(astBeamParams[nIter].stBeamParams.nBCRange, BitWidthConstants.PMPS_BCRANGE_BITS);
     fbJson.AddStringMember(
         v:=ajsonState[nIter],
         member:='nBeamClassRange',

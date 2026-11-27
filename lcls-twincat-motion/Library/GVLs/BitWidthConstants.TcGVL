@@ -1,0 +1,42 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <GVL Name="BitWidthConstants" Id="{031279b3-450c-4433-9091-d73c04523f75}">
+    <Declaration><![CDATA[{attribute 'qualified_only'}
+(*
+    Global Bit Width and Full Scale Constants
+
+    Integer bit widths and the full-scale limits derived from them, declared
+    once here instead of being repeated as opaque literals inside logic:
+
+        PMPS_EVRANGE_BITS, PMPS_BCRANGE_BITS:
+            how many bits of each PMPS beam parameter bitmask are serialized
+            into the PMPS JSON documents (see FB_PMPSJsonTestHelper).
+        ENCODER_UDINT_ROLLOVER, ENCODER_ULINT_FULL_SCALE:
+            full-scale limits of the raw encoder counters, used to detect and
+            unwrap inverted encoders that count down from the top of the
+            unsigned range (see FB_EncoderValue).
+
+    These values are fixed by the underlying data types and by the PMPS JSON
+    schema, so they are constants and are not reconfigurable at the project
+    level.
+
+    History:
+        2026-11-27: Created for audit task #279, replacing the raw literals
+                    32, 15, 2^32 and 2^64-1 in FB_PMPSJsonTestHelper and
+                    FB_EncoderValue.
+*)
+VAR_GLOBAL CONSTANT
+    // Width in bits of the PMPS photon energy range bitmask (ST_BeamParams.neVRange is a DWORD)
+    PMPS_EVRANGE_BITS: UINT := 32;
+    // Width in bits of the PMPS beam class range bitmask (15 beam classes: 0-14 plus "unknown")
+    PMPS_BCRANGE_BITS: UINT := 15;
+
+    // First value that no longer fits a UDINT (2^32). A raw counter at or above
+    // this has counted down from the top of the unsigned range (inverted encoder).
+    ENCODER_UDINT_ROLLOVER: ULINT := ULINT#4294967296;
+    // Largest ULINT value (2^64 - 1), the top of the raw unsigned encoder range
+    // and the mirror point used to unwrap inverted counter readings.
+    ENCODER_ULINT_FULL_SCALE: ULINT := ULINT#18446744073709551615;
+END_VAR]]></Declaration>
+  </GVL>
+</TcPlcObject>

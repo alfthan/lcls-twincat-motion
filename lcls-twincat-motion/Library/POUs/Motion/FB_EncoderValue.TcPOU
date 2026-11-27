@@ -14,6 +14,9 @@
 
     To this end, we figure out which encoder is linked and process
     the value appropriately.
+
+    The UDINT rollover (2^32) and ULINT full-scale (2^64 - 1) limits used
+    to unwrap inverted encoders are named constants in BitWidthConstants.
 *)
 VAR_IN_OUT
     stMotionStage: ST_MotionStage;
@@ -21,10 +24,12 @@ END_VAR
 ]]></Declaration>
     <Implementation>
       <ST><![CDATA[IF stMotionStage.nRawEncoderULINT <> 0 THEN
-    IF stMotionStage.nRawEncoderULINT < 4294967296 THEN
+    // Below the UDINT rollover (2^32): the counter is a plain rising value
+    IF stMotionStage.nRawEncoderULINT < BitWidthConstants.ENCODER_UDINT_ROLLOVER THEN
         stMotionStage.nEncoderCount := ULINT_TO_UDINT(stMotionStage.nRawEncoderULINT);
     ELSE
-        stMotionStage.nEncoderCount := ULINT_TO_UDINT(18446744073709551615 - stMotionStage.nRawEncoderULINT);
+        // Above it: inverted encoder, mirror the count down from the ULINT full scale (2^64 - 1)
+        stMotionStage.nEncoderCount := ULINT_TO_UDINT(BitWidthConstants.ENCODER_ULINT_FULL_SCALE - stMotionStage.nRawEncoderULINT);
     END_IF
 ELSIF stMotionStage.nRawEncoderUINT <> 0 THEN
     stMotionStage.nEncoderCount := UINT_TO_UDINT(stMotionStage.nRawEncoderUINT);
