@@ -4,36 +4,68 @@
     <Declaration><![CDATA[TYPE ST_DS402Drive:
 STRUCT
     (* Global variables for the TPDO data from the drive. Each one is linked to the respective TPDO channel. *)
+    // CiA-402 statusword, object 16#6041: bit-coded drive state/flags, unitless.
+    // Decoded bit by bit into ST_DS402DriveStatus (bit 0 = ReadyToSwitchOn ... bit 13).
     stDriveStatus 			AT %I*	: 	ST_DS402DriveStatus;
     {attribute 'pytmc' := '
         pv: eOpModeDisplay
         io: i
         field: DESC MCS2 current operating mode
     '}
+    // CiA-402 mode of operation display, object 16#6061: operating mode the drive is
+    // actually in, as a unitless code (see E_MCS2OpMode / E_DS402OpMode, e.g. 8 = CSP).
     nModeOfOperationDisplay AT %I*	: 	SINT;
     //nActualPosition 		AT %I*	: 	DINT;
-    (*CSP drive mode*)
+    // CiA-402 following error actual value, object 16#60F4 (CSP monitoring).
+    // Units: drive position units, i.e. the same units as nTargetPosition; no PLC-side scaling or conversion.
     nFollowingError 		AT %I*	: 	DINT;
     (* Global variables for the RPDO data to the drive. Each one is linked to the respective RPDO channel. *)
     // connected to I/O Task 'Control Word'
+    // CiA-402 controlword, object 16#6040, written by the PLC I/O task: bit-coded, unitless
+    // (6 = shutdown, 7 = switch on, 15 = enable operation, bit 4 = mode specific, 16#80 = fault reset).
     nDriveControl			AT %Q*	:	UINT;
-    // Connected to NC task Ctrl 1 and Ctrl 2
+    // CiA-402 controlword, object 16#6040, written by the NC task (Ctrl 1 and Ctrl 2): same bit
+    // coding as nDriveControl, unitless. Copied into nDriveControl while NC (CSP) control is active.
     nDriveControlNC			AT %I*	:	UINT;
+    // CiA-402 target position, object 16#607A, for CSP and profile moves. Units: drive position
+    // units, defined in the drive by gear ratio (16#6091) and feed constant (16#6092) - typically
+    // encoder increments. The PLC writes the raw DINT, so no scaling is applied on this side.
     nTargetPosition 		AT %Q* 	: 	DINT;
+    // CiA-402 mode of operation request, object 16#6060, written by the PLC: unitless code
+    // (see E_MCS2OpMode / E_DS402OpMode, e.g. 8 = CSP, 6 = homing).
     nModeOfOperation 		AT %Q* 	: 	SINT;
+    // CiA-402 mode of operation request, object 16#6060, as written by the NC task: unitless code,
+    // same coding as nModeOfOperation.
     nModeOfOperationNC 		AT %I* 	: 	SINT;
     (* Global variables for the RPDO data to the drive. Each one is linked to the respective RPDO channel. *)
+    // CiA-402 profile velocity, object 16#6081, used by the drive's own profile modes. Units: drive
+    // user velocity units per second (position units of 16#6092 divided by the velocity factor of
+    // 16#6096) - no PLC-side scaling. Not used in CSP, where the NC supplies the trajectory.
     nProfilVelocity 		AT %Q* 	: 	DINT;
+    // CiA-402 profile acceleration, object 16#6083, used by the drive's own profile modes. Units:
+    // drive user acceleration units (velocity units of 16#6081 per second) - no PLC-side scaling.
     nProfilAcceleration		AT %Q* 	: 	DINT;
+    // CiA-402 profile deceleration, object 16#6084, used by the drive's own profile modes. Units:
+    // drive user deceleration units (velocity units of 16#6081 per second) - no PLC-side scaling.
     nProfilDecceleration	AT %Q* 	: 	DINT;
+    // CiA-402 velocity actual value, object 16#606C: velocity the drive measures. Units: drive user
+    // velocity units per second (same units as nProfilVelocity) - no PLC-side scaling.
+    // Declared AT %Q* here, so verify the PDO link direction against the drive mapping when wiring.
     nVelocityActualValue	AT %Q* 	: 	DINT;
-    (* Global variables for the TPDO data from the drive. Each one is linked to the respective TPDO channel. *)
+    (* Raw PDO mirrors declared as outputs (AT %Q*), linked by the application; not referenced by the library logic. *)
+    // Scan target position mirror (raw DINT). Units: drive position units, as nTargetPosition - no
+    // PLC-side scaling. Currently unused by the library logic; kept for application-side linking.
     nScantargetPosition		AT %Q*	: 	DINT;
+    // Scan target velocity mirror (raw ULINT). Units: drive user velocity units per second, as
+    // nProfilVelocity - no PLC-side scaling. Currently unused by the library logic.
     uScantargetVelocity		AT %Q*	: 	ULINT;
     (* Port Number of EtherCAT Slave *)
+    // EtherCAT slave address the drive answers on, unitless; passed to the CoE SDO read/write blocks (nSlaveAddr input).
     nSlaveAddr	AT %I*  : UINT;
     (* EtherCAT slave ESM state, linked to the slave's InfoData.State.
        Low nibble is the state: 1=INIT, 2=PREOP, 4=SAFEOP, 8=OP. *)
+    // EtherCAT slave ESM state, unitless enum in the low nibble: 1=INIT, 2=PREOP, 4=SAFEOP, 8=OP.
+    // Used by FB_WriteChanParameters to gate the PreOp-only SDO writes (16#2009 logical scale inversion, 16#200C safe direction).
     nEcatState	AT %I*  : UINT;
 END_STRUCT
 END_TYPE
