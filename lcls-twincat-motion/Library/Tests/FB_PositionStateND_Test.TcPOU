@@ -13,6 +13,7 @@
 
     Additional tests:
     - Regression test for issue #197 (input deadlock)
+    - Out of range state requests are rejected instead of being used as array indices
 *)
 VAR
     stMotionStage1: ST_MotionStage;
@@ -121,6 +122,7 @@ Test3D(7, E_TestStates.OUT);
 Test3D(8, E_TestStates.TARGET1);
 Test3D(9, E_TestStates.TARGET2);
 TestInputDeadlock(10);
+TestOutOfRangeSet(11);
 
 IF bOneTestDone THEN
     bOneTestDone := FALSE;
@@ -471,6 +473,133 @@ IF tonTimer.Q OR nTestStep = 7 THEN
         eEnumSet:=eSetPos,
         eEnumGet:=eGetPos,
         bEnable:=TRUE,
+    );
+    bOneTestDone := TRUE;
+    TEST_FINISHED();
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="TestOutOfRangeSet" Id="{a922ca6a-a3be-42ce-91ef-c4728379461c}">
+      <Declaration><![CDATA[METHOD TestOutOfRangeSet
+(*
+    Verify that a state request outside of the state array bounds is rejected.
+
+    The EPICS-facing set value is an external request, so it may be anything.
+    Before the fix it was copied straight into the goal index and used to index
+    astPositionState, which is an out of bounds read for GeneralConstants.MAX_STATES + 1.
+
+    Here we check that:
+    1. An out of range request reports an error and does not move the motor
+    2. The error clears on reset
+    3. A valid request still moves the motor afterwards
+*)
+VAR_INPUT
+    // The test number this method is responsible for
+    nTestID: UINT;
+END_VAR
+VAR_INST
+    // The current step of this test
+    nTestStep: UINT := 1;
+    // The out of range state request to send to the function block
+    nBadSetValue: UINT;
+    // A valid state request to check that the function block still works
+    eGoodSet: E_TestStates;
+    // The motor position at the start of the test
+    fStartPos: LREAL;
+END_VAR
+]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[TEST('TestOutOfRangeSet');
+IF nTestCounter <> nTestID THEN
+    RETURN;
+END_IF
+
+CASE nTestStep OF
+    // Step 1: send a state index past the end of the state array and expect a rejection
+    1:
+        fStartPos := stMotionStage1.stAxisStatus.fActPosition;
+        nBadSetValue := GeneralConstants.MAX_STATES;
+        nBadSetValue := nBadSetValue + 1;
+        fb_Move1D(
+            stMotionStage:=stMotionStage1,
+            astPositionState:=astPositionState1,
+            eEnumSet:=nBadSetValue,
+            eEnumGet:=eGetPos,
+            bEnable:=TRUE,
+        );
+        IF fb_Move1D.stPlcToEpics.bError THEN
+            AssertEquals_UDINT(
+                Expected:=E_LCLSMotionError.INVALID,
+                Actual:=fb_Move1D.stPlcToEpics.nErrorID,
+                Message:='Out of range state request should be rejected as an invalid state',
+            );
+            AssertFalse(
+                Condition:=fb_Move1D.stPlcToEpics.bBusy,
+                Message:='Out of range state request should not start a move',
+            );
+            AssertEquals_LREAL(
+                Expected:=fStartPos,
+                Actual:=stMotionStage1.stAxisStatus.fActPosition,
+                Delta:=0.1,
+                Message:='Out of range state request should not move the motor',
+            );
+            // Acknowledge the rejected request
+            nBadSetValue := 0;
+            fb_Move1D.stEpicsToPlc.bReset := TRUE;
+            nTestStep := 2;
+        END_IF
+    // Step 2: hold the acknowledge for one cycle so the latched request error clears
+    2:
+        fb_Move1D(
+            stMotionStage:=stMotionStage1,
+            astPositionState:=astPositionState1,
+            eEnumSet:=nBadSetValue,
+            eEnumGet:=eGetPos,
+            bEnable:=TRUE,
+        );
+        AssertFalse(
+            Condition:=fb_Move1D.stPlcToEpics.bError,
+            Message:='The rejected request error should clear on reset',
+        );
+        fb_Move1D.stEpicsToPlc.bReset := FALSE;
+        eGoodSet := E_TestStates.TARGET1;
+        nTestStep := 3;
+    // Step 3: a valid request must still be accepted after the rejection
+    3:
+        fb_Move1D(
+            stMotionStage:=stMotionStage1,
+            astPositionState:=astPositionState1,
+            eEnumSet:=eGoodSet,
+            eEnumGet:=eGetPos,
+            bEnable:=TRUE,
+        );
+        nTestStep := 4;
+    // Step 4: wait for the move to finish and check that we arrived
+    4:
+        fb_Move1D(
+            stMotionStage:=stMotionStage1,
+            astPositionState:=astPositionState1,
+            eEnumSet:=eGoodSet,
+            eEnumGet:=eGetPos,
+            bEnable:=TRUE,
+        );
+        IF fb_Move1D.stPlcToEpics.bDone THEN
+            AssertEquals_LREAL(
+                Expected:=astPositionState1[E_TestStates.TARGET1].fPosition,
+                Actual:=stMotionStage1.stAxisStatus.fActPosition,
+                Delta:=0.1,
+                Message:='Did not reach the valid state after rejecting an out of range request',
+            );
+            bOneTestDone := TRUE;
+            TEST_FINISHED();
+        END_IF
+END_CASE
+
+// Timeout and final checks
+IF tonTimer.Q THEN
+    AssertFalse(
+        Condition:=tonTimer.Q,
+        Message:='Timeout in the out of range state request test',
     );
     bOneTestDone := TRUE;
     TEST_FINISHED();

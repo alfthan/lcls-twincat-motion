@@ -149,6 +149,21 @@ FOR nIndex := 1 TO GeneralConstants.MAX_STATES DO
     END_IF
 END_FOR
 
+// The state request is written by the subclass from the EPICS-facing enum,
+// so it must be validated against the arrStates bounds before it can become a goal index.
+// Reject out-of-range values instead of using them to index arrStates.
+IF setState < 0 OR setState > GeneralConstants.MAX_STATES THEN
+    setState := 0;
+    goalState := 0;
+    bNewGoal := FALSE;
+    // Latch the error, but do not overwrite an uncleared existing error
+    IF NOT bError THEN
+        bError := TRUE;
+        nErrorId := E_LCLSMotionError.INVALID;
+        sErrorMessage := 'Rejected state request outside of the arrStates bounds';
+    END_IF
+END_IF
+
 // Use the changing set pv as a rising-edge trigger
 IF setState <> goalState THEN
     goalState := setState;
@@ -171,7 +186,9 @@ ELSIF bNewGoal THEN
 END_IF
 
 // Pick the correct goal structure or Unknown
-IF goalState = 0 THEN
+// Keep the bounds check adjacent to the indexed access as well:
+// goalState is only ever set from the validated setState above.
+IF goalState < 1 OR goalState > GeneralConstants.MAX_STATES THEN
     stGoal := stUnknown;
 ELSE
     stGoal := arrStates[goalState];

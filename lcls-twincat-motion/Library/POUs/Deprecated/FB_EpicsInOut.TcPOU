@@ -43,7 +43,7 @@ VAR_OUTPUT
 END_VAR
 VAR
     bInit: BOOL;
-    arrStates: ARRAY[1..15] OF ST_PositionState;
+    arrStates: ARRAY[1..GeneralConstants.MAX_STATES] OF ST_PositionState;
 
     {attribute 'pytmc' := '
         pv:
@@ -60,7 +60,7 @@ IF NOT bInit THEN
     bInit := TRUE;
 END_IF
 
-// Stuff first two values of the 15 element array for the manager
+// Stuff first two values of the state array for the manager
 arrStates[1] := stOut;
 arrStates[2] := stIn;
 

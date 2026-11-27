@@ -62,15 +62,35 @@ VAR
     bEnable: BOOL;
     nGoalAtClear : UINT;
     rtEnable: R_TRIG;
+    // Validated copy of nCurrGoal, always within the astDbStateParams bounds
+    nGoalState: UINT;
+    // Validated copy of the readback state index, always within the astDbStateParams bounds
+    nGetState: UINT;
+    // TRUE if either index was out of range and had to be replaced
+    bInvalidIndex: BOOL;
 END_VAR
 ]]></Declaration>
     <Implementation>
       <ST><![CDATA[
+// Both of these indices are supplied from outside of this FB and are used below to index
+// astDbStateParams (declared 0..GeneralConstants.MAX_STATES). An out-of-range value would read
+// arbitrary memory as our beam parameters, so validate them and fall back to the transition
+// entry (index 0) instead of ever indexing out of bounds.
+nGoalState := nCurrGoal;
+nGetState := stPlcToEpics.nGetValue;
+bInvalidIndex := nGoalState > GeneralConstants.MAX_STATES OR nGetState > GeneralConstants.MAX_STATES;
+IF nGoalState > GeneralConstants.MAX_STATES THEN
+    nGoalState := 0;
+END_IF
+IF nGetState > GeneralConstants.MAX_STATES THEN
+    nGetState := 0;
+END_IF
+
 IF stPMPSEpicsToPlc.bMaintMode OR NOT stPMPSEpicsToPlc.bArbiterEnabled THEN
     eStatePMPSStatus := E_StatePMPSStatus.DISABLED;
-ELSIF stPlcToEpics.nGetValue = 0 AND nCurrGoal = 0 THEN
+ELSIF nGetState = 0 AND nGoalState = 0 THEN
     eStatePMPSStatus := E_StatePMPSStatus.UNKNOWN;
-ELSIF stPlcToEpics.nGetValue = nCurrGoal THEN
+ELSIF nGetState = nGoalState THEN
     eStatePMPSStatus := E_StatePMPSStatus.AT_STATE;
 ELSE
     eStatePMPSStatus := E_StatePMPSStatus.TRANSITION;
@@ -92,13 +112,13 @@ fbMotionBPTM(
     astMotionStage:=astMotionStageMax,
     fbArbiter:=fbArbiter,
     fbFFHWO:=fbFFHWO,
-    stGoalParams:=fbMotionReadPMPSDB.astDbStateParams[nCurrGoal],
+    stGoalParams:=fbMotionReadPMPSDB.astDbStateParams[nGoalState],
     stTransParams:=fbMotionReadPMPSDB.astDbStateParams[0],
     nActiveMotorCount:=nActiveMotorCount,
     bEnable:=bEnable,
-    bAtState:=stPlcToEpics.nGetValue = nCurrGoal AND nCurrGoal <> 0,
+    bAtState:=nGetState = nGoalState AND nGoalState <> 0,
     sDeviceName:=sDeviceName,
-    bRetry:=rtEnable.Q AND nGoalAtClear = nCurrGoal,
+    bRetry:=rtEnable.Q AND nGoalAtClear = nGoalState,
     bTransitionAuthorized=>,
     bDone=>,
     bMotorCountError=>,
@@ -110,7 +130,7 @@ fbMotionClearAsserts(
     bExecute:=NOT fbMotionBPTM.bEnable,
 );
 IF fbMotionClearAsserts.bExecute THEN
-    nGoalAtClear := nCurrGoal;
+    nGoalAtClear := nGoalState;
 END_IF
 
 fbStatePMPSEnables(
@@ -119,7 +139,7 @@ fbStatePMPSEnables(
     fbFFHWO:=fbFFHWO,
     bEnable:=bEnablePositionLimits,
     nActiveMotorCount:=nActiveMotorCount,
-    nGoalStateIndex:=nCurrGoal,
+    nGoalStateIndex:=nGoalState,
     sDeviceName:=sDeviceName,
     bMaintMode:=stPMPSEpicsToPlc.bMaintMode,
     eStatePMPSStatus:=eStatePMPSStatus,
@@ -132,7 +152,7 @@ fbStatePMPSEnables(
 );
 
 IF bEnableBeamParams THEN
-    fbMiscStatesErrorFFO.stCurrentBeamReq := fbMotionReadPMPSDB.astDbStateParams[stPlcToEpics.nGetValue].stBeamParams;
+    fbMiscStatesErrorFFO.stCurrentBeamReq := fbMotionReadPMPSDB.astDbStateParams[nGetState].stBeamParams;
 ELSE
     fbMiscStatesErrorFFO.stCurrentBeamReq := PMPS_GVL.cstFullBeam;
 END_IF
@@ -140,7 +160,7 @@ fbMiscStatesErrorFFO(
     fbArbiter:=fbArbiter,
     fbFFHWO:=fbFFHWO,
     sDeviceName:=sDeviceName,
-    bKnownState:=stPlcToEpics.nGetValue > 0,
+    bKnownState:=nGetState > 0,
     nTransitionID:=fbMotionReadPMPSDB.astDbStateParams[0].nRequestAssertionID,
 );
 
@@ -153,7 +173,15 @@ fbPerMotorFFO(
 );
 
 stPMPSPlcToEpics.stTransitionDb := fbMotionReadPMPSDB.astDbStateParams[0];
-stDbStateParams := fbMotionReadPMPSDB.astDbStateParams[stPlcToEpics.nGetValue];]]></ST>
+stDbStateParams := fbMotionReadPMPSDB.astDbStateParams[nGetState];
+
+// Report a rejected state or readback index through the standard EPICS error channel.
+// Do not overwrite an error that another block already reported this cycle.
+IF bInvalidIndex AND NOT stPlcToEpics.bError THEN
+    stPlcToEpics.bError := TRUE;
+    stPlcToEpics.nErrorID := E_LCLSMotionError.INVALID;
+    stPlcToEpics.sErrorMsg := 'Rejected state or readback index outside of the state array bounds';
+END_IF]]></ST>
     </Implementation>
   </POU>
 </TcPlcObject>

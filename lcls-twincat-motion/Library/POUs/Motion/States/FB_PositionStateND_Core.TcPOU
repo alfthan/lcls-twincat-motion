@@ -46,6 +46,8 @@ VAR
     astMoveGoals: ARRAY[1..MotionConstants.MAX_STATE_MOTORS] OF ST_PositionState;
     stInvalidPos: ST_PositionState;
     nIterMotor: DINT;
+    // TRUE if the requested goal state was outside of the state array bounds and had to be rejected
+    bInvalidGoal: BOOL;
 END_VAR]]></Declaration>
     <Implementation>
       <ST><![CDATA[
@@ -75,8 +77,16 @@ fbInput(
     bResetMove=>,
 );
 
+// nCurrGoal is derived from the external EPICS state request, so validate it against the
+// declared astPositionStateMax bounds before it can be used as an array index.
+// An out-of-range value is rejected here and reported below.
+bInvalidGoal := nCurrGoal > GeneralConstants.MAX_STATES;
+IF bInvalidGoal THEN
+    nCurrGoal := 0;
+END_IF
+
 FOR nIterMotor := 1 TO MotionConstants.MAX_STATE_MOTORS DO
-    IF nCurrGoal > 0 THEN
+    IF nCurrGoal > 0 AND nCurrGoal <= GeneralConstants.MAX_STATES THEN
         astMoveGoals[nIterMotor] := astPositionStateMax[nIterMotor][nCurrGoal];
     ELSE
         astMoveGoals[nIterMotor] := stInvalidPos;
@@ -97,6 +107,14 @@ fbMove(
     bBusy=>stPlcToEpics.bBusy,
     bDone=>stPlcToEpics.bDone,
 );
+
+// Report a rejected state request through the standard EPICS error channel.
+// Do not overwrite an error that the move itself already reported this cycle.
+IF (bInvalidGoal OR fbInput.bInvalidRequest) AND NOT stPlcToEpics.bError THEN
+    stPlcToEpics.bError := TRUE;
+    stPlcToEpics.nErrorID := E_LCLSMotionError.INVALID;
+    stPlcToEpics.sErrorMsg := 'Rejected state request outside of the state array bounds';
+END_IF
 
 eEnumSet := stEpicsToPlc.nSetValue;
 eEnumGet := stPlcToEpics.nGetValue;

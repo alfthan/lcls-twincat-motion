@@ -29,6 +29,9 @@ VAR_OUTPUT
     bExecMove: BOOL;
     // The bReset boolean to input to the motion FB
     bResetMove: BOOL;
+    // TRUE if a state request was rejected because it was outside of the valid state range.
+    // This is latched until the next reset or first-cycle init.
+    bInvalidRequest: BOOL;
 END_VAR
 VAR
     nState: UINT;
@@ -36,6 +39,8 @@ VAR
     nQueuedGoal: UINT;
     bNewMove: BOOL;
     nCachedStart: UINT;
+    // The starting state, clamped into the range 0..GeneralConstants.MAX_STATES
+    nStartState: UINT;
 END_VAR
 VAR CONSTANT
     IDLE: UINT := 0;
@@ -45,15 +50,31 @@ END_VAR
 ]]></Declaration>
     <Implementation>
       <ST><![CDATA[
+// The starting state comes from the position readback. Clamp it into the valid state range
+// so that it can never be used as an out-of-range index by a consumer of nCurrGoal.
+nStartState := nStartingState;
+IF nStartState > GeneralConstants.MAX_STATES THEN
+    nStartState := 0;
+END_IF
+
 bResetMove := stUserInput.bReset;
 IF bResetMove OR NOT bInit THEN
     bInit := TRUE;
     stUserInput.nSetValue := 0;
-    nCurrGoal := nStartingState;
-    nCachedStart := nStartingState;
+    nCurrGoal := nStartState;
+    nCachedStart := nStartState;
     bExecMove := FALSE;
     nState := IDLE;
     bNewMove := FALSE;
+    bInvalidRequest := FALSE;
+END_IF
+
+// Reject an out-of-range state request (e.g. a bad EPICS enum write) instead of letting it
+// become a state index. nSetValue is written back to the caller's struct, so a request that
+// keeps being re-sent is rejected again on the next cycle.
+IF stUserInput.nSetValue > GeneralConstants.MAX_STATES THEN
+    stUserInput.nSetValue := 0;
+    bInvalidRequest := TRUE;
 END_IF
 
 IF stUserInput.nSetValue <> 0 THEN
@@ -71,10 +92,10 @@ CASE nState OF
         ELSIF bMoveBusy THEN
             // We're moving but used to be idle -> switch to GOING
             nState := GOING;
-        ELSIF nStartingState <> nCachedStart THEN
+        ELSIF nStartState <> nCachedStart THEN
             // Usually a late position init, sometimes a live change in encoder offset
             // The state changed without a move, so we need to partially reinitialize.
-            nCurrGoal := nStartingState;
+            nCurrGoal := nStartState;
         END_IF
     GOING:
         IF bNewMove THEN
@@ -97,7 +118,7 @@ IF bMoveError THEN
 END_IF
 
 // Detect if the set/start position updates without a move
-nCachedStart := nStartingState;
+nCachedStart := nStartState;
 
 // Help us detect if there is an EPICS put before the next cycle
 stUserInput.nSetValue := 0;
