@@ -1,24 +1,70 @@
 ﻿<?xml version="1.0" encoding="utf-8"?>
 <TcPlcObject Version="1.1.0.1">
   <POU Name="FB_WriteHomeParameters" Id="{e85d8b4a-38f0-4a4c-8985-f84fb315cac2}" SpecialFunc="None">
-    <Declaration><![CDATA[// The SDO writes can be done sequentially at boot or on demand during normal use.
-// Set bForceSequentialSDOs TRUE (debug) to enforce sequential behavior at any time.
+    <Declaration><![CDATA[// Purpose: write the MCS2 homing parameters (search/sync velocity, acceleration,
+// offset and referencing options) to the drive over CoE SDO writes.
+//
+// Usage: enable the block with bEnable. One sequential sweep runs 4 s after the
+// enable, so the EtherCAT mailbox is up before the first CoE request. After that
+// every parameter is written on demand, whenever its setpoint differs from the
+// value last written to the drive.
+//
+// Re-run: a rising edge on bExecute runs the sequential sweep again at any time
+// (restored parameters, drive swap, or several values edited at once) without a
+// power cycle. The sweep is armed by that edge and then runs to completion: the
+// falling edge of bExecute does not abandon a set of SDO writes half applied, so
+// the drive never keeps a partially updated parameter set. A new rising edge
+// after the sweep finished re-runs it.
+//
+// Done: bHomingParamsSet is the held done state. It is set when every requested
+// write completed, and cleared only by bAcknowledge, by arming a new sweep, or
+// while a fresh write is in flight (at that moment the drive no longer holds the
+// requested set). Dropping bEnable or bExecute never clears it.
+//
+// Error: an SDO write fault latches nHomingStep = ERROR together with
+// stMotionStage.bError and stMotionStage.nErrorId, and the sweep stops. Dropping
+// or cycling bEnable, bExecute or bForceSequentialSDOs does not clear it.
+//
+// Acknowledge: a rising edge on bAcknowledge clears the held done and error
+// state. It is the only path that clears a latched fault -- wire it to the
+// caller's fault reset (e.g. stMotionStage.bReset). It is honoured in the settled
+// DONE and ERROR states, in which this block commands no SDO write; an
+// acknowledge that arrives while the sweep is still running is ignored, so it can
+// never abandon a write in flight nor mask a fault raised by one. Clearing the
+// fault re-enters the on-demand path, which retries the failed parameter; a fault
+// whose condition persists therefore re-latches on the following scans.
+//
+// Objectives: never overlap CoE mailbox requests, and keep the parameter set
+// diagnosable and re-runnable without a restart or an online variable write.
+//
+// History:
+// 2026-11-27, Scirix agent: add the bExecute and bAcknowledge inputs and hold the
+// done/error state until the caller acknowledges it (audit finding #1108). The
+// sweep is no longer armed from the bHomingParamsSet output, so it can be re-run
+// on demand instead of only through the debug bForceSequentialSDOs flag.
 FUNCTION_BLOCK FB_WriteHomeParameters
 VAR_INPUT
-    bEnable : BOOL;
+    bEnable          : BOOL; // TRUE to run the block; FALSE retires a sweep in progress
+    bExecute         : BOOL; // Rising edge re-runs the sequential parameter sweep
+    bAcknowledge     : BOOL; // Rising edge clears the held done/error state
 END_VAR
 VAR_IN_OUT
-    stDS402Drive         : ST_DS402Drive;
-    stMotionStage        : ST_MotionStage;
-    stMCS2ChanParameter	: ST_MCS2ChanParameter;
+    stDS402Drive         : ST_DS402Drive;        // EtherCAT drive the SDOs are written to
+    stMotionStage        : ST_MotionStage;       // Stage state; carries the latched bError/nErrorId
+    stMCS2ChanParameter	: ST_MCS2ChanParameter; // Requested homing setpoints and their SDO indices
 END_VAR
 
 VAR_OUTPUT
-   bHomingParamsSet : BOOL;
+   bHomingParamsSet : BOOL; // Held done: every homing parameter written, no write in flight
 END_VAR
 VAR
-    nHomingStep : (IDLE := 0, VELO_FAST := 1, VELO_SLOW := 2, ACC := 3, OFFSET := 4, REF_OPT := 5, DONE := 10, ERROR := -1) := IDLE;
-    bForceSequentialSDOs : BOOL := FALSE;
+    nHomingStep : (IDLE := 0, VELO_FAST := 1, VELO_SLOW := 2, ACC := 3, OFFSET := 4, REF_OPT := 5, DONE := 10, ERROR := -1) := IDLE; // Sequential sweep state; ERROR is held until acknowledged
+    bSweepActive : BOOL; // TRUE while the sequential sweep owns the SDO writers
+    bStartupArmed : BOOL; // TRUE once the post-enable delay elapsed, so it cannot re-arm
+    bForceSequentialSDOs : BOOL := FALSE; // Debug: a rising edge forces one extra sequential sweep
+    rtExecute : R_TRIG; // Rising-edge detector for bExecute
+    rtAcknowledge : R_TRIG; // Rising-edge detector for bAcknowledge
+    rtForceSequentialSDOs : R_TRIG; // Rising-edge detector for the debug force flag
     {attribute 'hide'}
     fbSetHomeOffs               : FB_EcCoESdoWrite;
     {attribute 'hide'}
@@ -52,8 +98,7 @@ VAR
     nRecentReferencingOpt       : UDINT;
     {attribute 'hide'}
     nHomeOffs                   : DINT;
-    tonStartUp : TON;
-    bErrorAcknowledge: BOOL;
+    tonStartUp : TON; // Post-enable delay before the first sequential sweep
 END_VAR
 ]]></Declaration>
     <Implementation>
@@ -63,21 +108,53 @@ END_VAR
     RETURN;
 END_IF
 
-IF bEnable THEN
-    tonStartUp(
-        IN := bEnable AND NOT bHomingParamsSet,
-        PT := T#4S
-    );
+// Post-enable delay: the first sequential sweep starts only once the drive and its
+// mailbox are up. bStartupArmed latches that this one delay has elapsed, so a
+// finished sweep cannot restart it and re-post done behind the caller's back.
+tonStartUp(
+    IN := bEnable AND NOT bStartupArmed,
+    PT := T#4S
+);
 
-    IF NOT tonStartUp.Q AND nHomingStep <> IDLE AND NOT bForceSequentialSDOs THEN
-        nHomingStep := IDLE;
+IF bEnable THEN
+    IF tonStartUp.Q THEN
+        bStartupArmed := TRUE;
+        IF nHomingStep <> ERROR THEN
+            nHomingStep  := IDLE;
+            bSweepActive := TRUE;
+        END_IF
     END_IF
 
-    IF nHomingStep = ERROR AND bErrorAcknowledge THEN
-        nHomingStep            := IDLE;
-        stMotionStage.bError   := FALSE;
-        stMotionStage.nErrorId := 0;
-        bErrorAcknowledge      := FALSE;
+    // On-demand re-run: the rising edge of bExecute restarts the sequential sweep.
+    // Ignored while a fault is held -- the fault must be acknowledged first, and a
+    // new command must never dismiss it.
+    rtExecute(CLK := bExecute);
+    IF rtExecute.Q AND nHomingStep <> ERROR THEN
+        bHomingParamsSet := FALSE;
+        nHomingStep      := IDLE;
+        bSweepActive     := TRUE;
+    END_IF
+
+    // Acknowledge: the only path that clears the held done or error state. Both are
+    // settled states in which this block commands no SDO write, so the acknowledge
+    // is ignored while a sweep is still running: it can never abandon a write in
+    // flight nor mask a fault raised by one.
+    rtAcknowledge(CLK := bAcknowledge);
+    IF rtAcknowledge.Q AND NOT bSweepActive THEN
+        bHomingParamsSet := FALSE;
+        IF nHomingStep = ERROR THEN
+            nHomingStep            := IDLE;
+            stMotionStage.bError   := FALSE;
+            stMotionStage.nErrorId := 0;
+        END_IF
+    END_IF
+
+    // Debug: one extra sequential sweep on the rising edge of bForceSequentialSDOs.
+    rtForceSequentialSDOs(CLK := bForceSequentialSDOs);
+    IF rtForceSequentialSDOs.Q AND nHomingStep <> ERROR THEN
+        bHomingParamsSet := FALSE;
+        nHomingStep      := IDLE;
+        bSweepActive     := TRUE;
     END_IF
 
     ScaleHomingParams();
@@ -88,7 +165,7 @@ IF bEnable THEN
     ftHomeOffsSetDone       (CLK := fbSetHomeOffs.bBusy);
     ftReferencingOptSetDone (CLK := fbReferencingOptWrite.bBusy);
 
-    IF tonStartUp.Q OR bForceSequentialSDOs THEN
+    IF bSweepActive THEN
         CASE nHomingStep OF
             IDLE:
                 bHomingParamsSet               := FALSE;
@@ -190,10 +267,14 @@ IF bEnable THEN
                 END_IF
 
             DONE:
+                // Held done: stays set until bAcknowledge or a new sweep request.
                 bHomingParamsSet := TRUE;
+                bSweepActive     := FALSE;
 
             ERROR:
+                // Held fault: cleared only by bAcknowledge.
                 bHomingParamsSet := FALSE;
+                bSweepActive     := FALSE;
 
             ELSE
                 nHomingStep := IDLE;
@@ -281,11 +362,23 @@ IF bEnable THEN
         cbBufLen   := SIZEOF(stMCS2ChanParameter.nReferencingOpt)
     );
 
+    // A fresh write in flight drops the held done state until it lands: at that
+    // moment the drive no longer holds the requested parameter set.
     bHomingParamsSet R= fbSetHomeVeloFast.bBusy
                      OR fbSetHomeVeloSlow.bBusy
                      OR fbSetHomeAcc.bBusy
                      OR fbSetHomeOffs.bBusy
                      OR fbReferencingOptWrite.bBusy;
+ELSE
+    // Disabled: retire a sweep in progress and park every SDO writer. The held
+    // done/error state is deliberately left alone -- only bAcknowledge clears it.
+    bSweepActive                   := FALSE;
+    bStartupArmed                  := FALSE;
+    fbSetHomeVeloFast.bExecute     := FALSE;
+    fbSetHomeVeloSlow.bExecute     := FALSE;
+    fbSetHomeAcc.bExecute          := FALSE;
+    fbSetHomeOffs.bExecute         := FALSE;
+    fbReferencingOptWrite.bExecute := FALSE;
 END_IF]]></ST>
     </Implementation>
     <Method Name="ScaleHomingParams" Id="{2c5b56b0-7eaa-4a13-8084-de781b4be994}">
