@@ -7,6 +7,14 @@ FUNCTION_BLOCK FB_PositionStatePMPS_Base
     FB_PositionStatePMPS without Arbiter, BPTM, FFO
 
     This allows me to test most of the code without an arbiter plc setup
+
+    The arbiter wait is always timed: tArbiterTimeout must be positive, and a value at or
+    below zero is clamped to MotionConstants.MIN_ARBITER_TIMEOUT and reported in
+    bArbiterTimeoutConfigError. When the wait expires, bArbiterTimeout is set so that the
+    subclass raises its transition fault instead of waiting forever.
+
+    History:
+    2026-11-27 - Always time the arbiter wait, enforce a positive tArbiterTimeout and fault on expiry.
 *)
 VAR_IN_OUT
     stMotionStage: ST_MotionStage;
@@ -23,6 +31,9 @@ VAR_INPUT
     setState: INT;
     getState: INT;
     fStateBoundaryDeadband: LREAL := 0;
+    // How long a transition may wait for arbiter authorization before the timeout fault is raised.
+    // Must be positive: a value at or below zero would leave the wait unbounded, so it is clamped
+    // up to MotionConstants.MIN_ARBITER_TIMEOUT and reported in bArbiterTimeoutConfigError.
     tArbiterTimeout: TIME := T#1s;
     bMoveOnArbiterTimeout: BOOL := TRUE;
 END_VAR
@@ -30,7 +41,11 @@ VAR_OUTPUT
     bTransitionAuthorized: BOOL;
     bForwardAuthorized: BOOL;
     bBackwardAuthorized: BOOL;
+    // TRUE once the transition has waited longer than the effective arbiter timeout.
+    // The arbiter wait is always timed, so the subclass raises its transition fault off this flag.
     bArbiterTimeout: BOOL;
+    // TRUE when tArbiterTimeout was configured at or below zero and had to be clamped to a positive value.
+    bArbiterTimeoutConfigError: BOOL;
 END_VAR
 VAR
     {attribute 'pytmc' := '
@@ -62,6 +77,8 @@ VAR
     bFwdOk: BOOL;
     bBwdOk: BOOL;
     tonArbiter: TON;
+    // The timeout actually loaded into tonArbiter: tArbiterTimeout, clamped to a positive value
+    tArbiterTimeoutEffective: TIME;
     bLateFinish: BOOL;
     bInternalAuth: BOOL;
 END_VAR]]></Declaration>
@@ -124,21 +141,27 @@ IF bArbiterEnabled THEN
     // Handles getting the request to the arbiter and back
     HandleBPTM();
     // Handle arbiter timeouts
-    IF tArbiterTimeout > T#0s THEN
-        tonArbiter(
-            IN:=bInTransition AND NOT bInternalAuth,
-            PT:=tArbiterTimeout,
-            Q=>bArbiterTimeout);
-    ELSE
-        bArbiterTimeout := FALSE;
+    // The arbiter wait is always timed so that a stuck transition cannot wait forever.
+    // Never skip the timer: a non-positive timeout is clamped to a positive value instead.
+    bArbiterTimeoutConfigError := tArbiterTimeout <= T#0s;
+    tArbiterTimeoutEffective := tArbiterTimeout;
+    IF bArbiterTimeoutConfigError THEN
+        tArbiterTimeoutEffective := MotionConstants.MIN_ARBITER_TIMEOUT;
     END_IF
+    tonArbiter(
+        IN:=bInTransition AND NOT bInternalAuth,
+        PT:=tArbiterTimeoutEffective,
+        Q=>bArbiterTimeout);
     bTransitionAuthorized S= bInternalAuth OR (bArbiterTimeout AND bMoveOnArbiterTimeout);
 ELSE
     // Clear all of our assertions if we decide to disable the arbiter
     ClearAsserts();
     // Do some dummy request handling
     bTransitionAuthorized := stMotionStage.bExecute;
-    bArbiterTimeout := stMotionStage.bExecute;
+    // No arbiter means no arbiter wait, so there is no timeout to raise here
+    tonArbiter(IN:=FALSE);
+    bArbiterTimeout := FALSE;
+    bArbiterTimeoutConfigError := FALSE;
 END_IF
 
 // Set up MPS virtual limit for moves at and between states

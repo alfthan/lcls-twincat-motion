@@ -15,6 +15,13 @@ VAR_GLOBAL CONSTANT
     If you are not sure how many motors are used per state block, check MOTION_GVL.nMaxStateMotorCount
     *)
     MAX_STATE_MOTORS: UINT := 3;
+
+    (*
+    The smallest arbiter wait that a PMPS block may use.
+    Arbiter waits are always timed: a configured timeout at or below zero would leave the transition
+    wait unbounded and silent, so it is clamped up to this value and reported as a configuration error.
+    *)
+    MIN_ARBITER_TIMEOUT: TIME := T#100ms;
 END_VAR]]></Declaration>
   </GVL>
 </TcPlcObject>

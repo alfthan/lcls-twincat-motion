@@ -669,6 +669,9 @@
     <Compile Include="Tests\FB_PositionStatePMPSND_Test.TcPOU">
       <SubType>Code</SubType>
     </Compile>
+    <Compile Include="Tests\FB_PositionStatePMPS_Base_Test.TcPOU">
+      <SubType>Code</SubType>
+    </Compile>
     <Compile Include="Tests\FB_PositionStateReadND_Test.TcPOU">
       <SubType>Code</SubType>
     </Compile>

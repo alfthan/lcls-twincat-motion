@@ -1,0 +1,210 @@
+<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="FB_PositionStatePMPS_Base_Test" Id="{2c1d3f47-9a1e-4c2b-8f6d-5b0e7a9c41d3}" SpecialFunc="None">
+    <Declaration><![CDATA[FUNCTION_BLOCK FB_PositionStatePMPS_Base_Test EXTENDS FB_MotorTestSuite
+(*
+    Test that FB_PositionStatePMPS_Base always bounds the arbiter wait.
+
+    The base block has no arbiter request handling (its HandleBPTM action is empty),
+    so nothing can ever authorize a transition here and every transition request must
+    expire. That makes this block the perfect place to prove that the arbiter wait is
+    always timed and that an expired wait is reported instead of silently ignored.
+
+    History:
+    2026-11-27 - Created to cover the positive-timeout enforcement and the expiry fault.
+*)
+VAR
+    // Position state array handed to the blocks under test
+    astPositionState: ARRAY[1..GeneralConstants.MAX_STATES] OF ST_PositionState;
+    // Block under test, configured with a zero arbiter timeout
+    fbZeroTimeout: FB_PositionStatePMPS_Base;
+    // Motion stage behind fbZeroTimeout
+    stZeroStage: ST_MotionStage;
+    // Step counter for TestZeroTimeout
+    nZeroStep: UINT;
+    // Block under test, configured with an ordinary positive arbiter timeout
+    fbPositiveTimeout: FB_PositionStatePMPS_Base;
+    // Motion stage behind fbPositiveTimeout
+    stPositiveStage: ST_MotionStage;
+    // Step counter for TestPositiveTimeout
+    nPositiveStep: UINT;
+    // Fails the test instead of hanging forever if a wait never expires
+    tonGuard: TON;
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[
+// Two good states to transition between
+astPositionState[1].sName := 'ONE';
+astPositionState[1].fPosition := 10;
+astPositionState[1].fDelta := 0.5;
+astPositionState[1].fAccel := 10;
+astPositionState[1].fDecel := 10;
+astPositionState[1].fVelocity := 10;
+SetGoodState(astPositionState[1]);
+astPositionState[2].sName := 'TWO';
+astPositionState[2].fPosition := 20;
+astPositionState[2].fDelta := 0.5;
+astPositionState[2].fAccel := 10;
+astPositionState[2].fDecel := 10;
+astPositionState[2].fVelocity := 10;
+SetGoodState(astPositionState[2]);
+
+// Give both stages the enables the blocks need to look like they could move
+SetEnables(stZeroStage);
+SetEnables(stPositiveStage);
+// The blocks do not consider their state valid until the axis parameters are in
+stZeroStage.bAxisParamsInit := TRUE;
+stPositiveStage.bAxisParamsInit := TRUE;
+
+TestZeroTimeout();
+TestPositiveTimeout();
+
+// Shared guard: no test should take longer than this
+tonGuard(IN:=TRUE, PT:=T#5s);]]></ST>
+    </Implementation>
+    <Method Name="RunZeroTimeout" Id="{5d8b0c22-6f4a-4d19-9e3b-7a1c2f8b6e50}">
+      <Declaration><![CDATA[METHOD RunZeroTimeout
+(*
+    Run the zero-timeout block under test for one cycle.
+*)
+VAR_INPUT
+    // Request a transition to state 2 on this cycle
+    bRequestTransition: BOOL;
+END_VAR
+]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[fbZeroTimeout(
+    stMotionStage:=stZeroStage,
+    arrStates:=astPositionState,
+    bArbiterEnabled:=TRUE,
+    bRequestTransition:=bRequestTransition,
+    setState:=2,
+    getState:=1,
+    tArbiterTimeout:=T#0s);]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="RunPositiveTimeout" Id="{8e04a7b1-3c92-4f58-b6a1-9d2e5c70f843}">
+      <Declaration><![CDATA[METHOD RunPositiveTimeout
+(*
+    Run the positive-timeout block under test for one cycle.
+*)
+VAR_INPUT
+    // Request a transition to state 2 on this cycle
+    bRequestTransition: BOOL;
+END_VAR
+]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[fbPositiveTimeout(
+    stMotionStage:=stPositiveStage,
+    arrStates:=astPositionState,
+    bArbiterEnabled:=TRUE,
+    bRequestTransition:=bRequestTransition,
+    setState:=2,
+    getState:=1,
+    tArbiterTimeout:=T#300ms);]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="TestPositiveTimeout" Id="{3a9f6d08-51c7-4b3e-a0d9-8f2b4c1e6a75}">
+      <Declaration><![CDATA[METHOD TestPositiveTimeout
+(*
+    An ordinary positive timeout should still be timed, and still raise the timeout on expiry.
+*)
+]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[TEST('TestPositiveTimeout');
+
+CASE nPositiveStep OF
+    0:
+        // First cycle: the block initializes to the current state
+        RunPositiveTimeout(FALSE);
+        nPositiveStep := 1;
+    1:
+        // Request the transition: it can never be authorized here, so the wait must expire
+        RunPositiveTimeout(TRUE);
+        AssertFalse(
+            Condition:=fbPositiveTimeout.bArbiterTimeoutConfigError,
+            Message:='A positive arbiter timeout was flagged as a configuration error',
+        );
+        AssertFalse(
+            Condition:=fbPositiveTimeout.bArbiterTimeout,
+            Message:='The arbiter timeout was raised before the timer expired',
+        );
+        nPositiveStep := 2;
+    2:
+        RunPositiveTimeout(TRUE);
+        IF fbPositiveTimeout.bArbiterTimeout THEN
+            nPositiveStep := 3;
+        END_IF
+    3:
+        AssertFalse(
+            Condition:=tonGuard.Q,
+            Message:='The arbiter wait never expired with a positive timeout',
+        );
+        AssertTrue(
+            Condition:=fbPositiveTimeout.bArbiterTimeout,
+            Message:='The arbiter wait expired without raising the timeout',
+        );
+        TEST_FINISHED();
+END_CASE
+
+IF tonGuard.Q AND nPositiveStep < 3 THEN
+    nPositiveStep := 3;
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="TestZeroTimeout" Id="{b6f2c8d1-4a70-4e95-83c2-1d5f9a6b7e24}">
+      <Declaration><![CDATA[METHOD TestZeroTimeout
+(*
+    A zero timeout must not silently disable the arbiter timer:
+    it is clamped to a positive value, flagged, and still expires.
+*)
+]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[TEST('TestZeroTimeout');
+
+CASE nZeroStep OF
+    0:
+        // First cycle: the block initializes to the current state
+        RunZeroTimeout(FALSE);
+        nZeroStep := 1;
+    1:
+        // Request the transition: it can never be authorized here, so the wait must expire
+        RunZeroTimeout(TRUE);
+        AssertTrue(
+            Condition:=fbZeroTimeout.bArbiterTimeoutConfigError,
+            Message:='A zero arbiter timeout was not flagged as a configuration error',
+        );
+        AssertFalse(
+            Condition:=fbZeroTimeout.bArbiterTimeout,
+            Message:='The arbiter timeout was raised before the clamped timer expired',
+        );
+        nZeroStep := 2;
+    2:
+        RunZeroTimeout(TRUE);
+        IF fbZeroTimeout.bArbiterTimeout THEN
+            nZeroStep := 3;
+        END_IF
+    3:
+        AssertFalse(
+            Condition:=tonGuard.Q,
+            Message:='The arbiter wait never expired with a zero timeout',
+        );
+        AssertTrue(
+            Condition:=fbZeroTimeout.bArbiterTimeout,
+            Message:='The arbiter wait expired without raising the timeout',
+        );
+        // bMoveOnArbiterTimeout defaults to TRUE, so an expiry authorizes the move
+        AssertTrue(
+            Condition:=fbZeroTimeout.bTransitionAuthorized,
+            Message:='The expired arbiter wait did not authorize the transition',
+        );
+        TEST_FINISHED();
+END_CASE
+
+IF tonGuard.Q AND nZeroStep < 3 THEN
+    nZeroStep := 3;
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+  </POU>
+</TcPlcObject>

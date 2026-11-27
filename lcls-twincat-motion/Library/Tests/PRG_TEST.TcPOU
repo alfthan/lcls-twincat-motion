@@ -21,6 +21,7 @@ VAR
     fb_PerMotorFFOND_Test: FB_PerMotorFFOND_Test;
     fb_StatePMPSEnablesND_Test: FB_StatePMPSEnablesND_Test;
     fb_PositionStatePMPSND_Test: FB_PositionStatePMPSND_Test;
+    fb_PositionStatePMPS_Base_Test: FB_PositionStatePMPS_Base_Test;
     fb_StateSetupHelper_Test: FB_StateSetupHelper_Test;
     fb_TestStateInitTiming: FB_TestStateInitTiming;
     fb_PowerEnableMode_Test: FB_PowerEnableMode_Test;
