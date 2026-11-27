@@ -4,15 +4,75 @@
     <Declaration><![CDATA[{attribute 'obsolete' := 'No longer any reason to use this, all state classes can have unit tests.'}
 FUNCTION_BLOCK FB_PositionStateBase_WithPMPS_Test EXTENDS FB_PositionStateBase
 (*
-    Handles EPICS moves between multiple states for a single axis with fake PMPS.
-    Should be subclassed for a specific enumSet and enumGet.
-    See body comment  or FB_PositionStateInOut_WithPMPS_Test for an implementation example.
+    Purpose: offline test base for a single-axis multi-state position function
+    block that keeps the PMPS shape of the interface but has no PMPS behind it
+    ("fake PMPS"). Each cycle it runs the inherited state machine
+    (StateHandler) followed by a PMPS stand-in (fbStatePMPS) that authorizes
+    every transition request after a fixed delay, so state classes can be
+    exercised end to end without an arbiter PLC, a BeamParameterTransitionManager
+    or a fast-fault output.
+
+    Usage: subclass me, translate setState from your enum and getState back to
+    it, fill arrStates on the first scan, then call Exec() every cycle - see the
+    body comment for the call order and FB_PositionStateInOut_WithPMPS_Test for
+    a complete IN/OUT implementation. This block is obsolete (see the attribute
+    above): new code uses FB_PositionStatePMPS1D/2D/3D with a real FB_Arbiter
+    and covers it with FB_PositionStateND_Test instead. It is kept only so that
+    existing legacy state test suites keep compiling and passing.
+
+    Objectives:
+    - Let a position-state subclass be tested (request, move, transition
+      authorization, state readback) with no PMPS hardware or arbiter database.
+    - Make the PMPS stand-in's limits explicit: it never talks to an arbiter and
+      never raises a fast fault, so the beam-parameter inputs below are inert
+      here and a test passing with this block says nothing about real
+      beam-permission behaviour.
+    - Record the meaning and units of the transition beam / assertion ID pair so
+      a reviewer can tell a genuine PMPS wiring from this offline stand-in.
+
+    Author: Zachary Lentz <zlentz@slac.stanford.edu>
+    History: 2020-07-10  Zachary Lentz  created as a fake-PMPS test base
+             2020-09-15  Zachary Lentz  default transition beam changed from
+                                        cstSafeBeam to cst0RateBeam (same
+                                        safety, better arbiter performance)
+             2021-02-16  Zachary Lentz  fixed an error in the test FB
+             2022-12-13  Zachary Lentz  reworked alongside the PMPS transition
+                                        database lookup
+             2023-03-15  Zachary Lentz  marked obsolete, kept for backcompat
+             2026-11-27  Scirix Agent  added purpose/usage/objectives/history
+                                        and declaration comments, no logic
+                                        changed (audit finding #131, task #138)
 *)
 VAR_INPUT
+    // The beam-parameter set of the "Transition" state: the beam requested
+    // while the axis travels between states. Units are those of ST_BeamParams
+    // - nTran = pre-optic transmission as a fraction 0..1 (1 = no attenuation),
+    // nRate = pulse rate in Hz (0 = no photons), neVRange = photon-energy range
+    // bitmask in eV, astAttenuators = attenuation in %, astApertures
+    // Width/Height in mm. PMPS_GVL.cst0RateBeam, the default, is that zero-rate
+    // transition beam (zero photons requested at full energy range). In the real
+    // FB_PositionStatePMPS this value is loaded from the beam-parameter database;
+    // NOT read by this block, because FB_PositionStatePMPS_Test has no arbiter
+    // and authorizes transitions on its own. Carried over from the _WithPMPS
+    // interface for compatibility: setting it here has no effect.
     stTransitionBeam: ST_BeamParams := PMPS_GVL.cst0RateBeam;
+    // The PMPS arbiter assertion ID that identifies the transition beam above in
+    // the arbiter's request pool (dimensionless UDINT, no engineering unit). It
+    // comes from the beam-parameter database entry for this device's transition
+    // key and is what the arbiter-backed block uses to add, remove and compare
+    // the transition request; PMPS_GVL.EXCLUDED_ASSERTION_ID (16#FFFFFFFF) is the
+    // reserved value that never matches a real request. NOT read by this block -
+    // the offline stand-in never adds or removes an assertion - so it is carried
+    // over from the _WithPMPS interface only and has no effect here.
     nTransitionAssertionID: UDINT;
 END_VAR
 VAR
+    // PMPS stand-in for the state machine: FB_PositionStatePMPS_Test extends
+    // FB_PositionStatePMPS_Base with no arbiter and no fast-fault output, and
+    // authorizes each transition 3 s after the request while
+    // stMotionStage.bExecute is TRUE. Called from the PMPSHandler action with
+    // the stage reference, the state array and this block's setState/getState;
+    // it needs no external wiring, unlike the real FB_PositionStatePMPS.
     fbStatePMPS: FB_PositionStatePMPS_Test;
 END_VAR]]></Declaration>
     <Implementation>
