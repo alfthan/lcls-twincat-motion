@@ -36,6 +36,12 @@ VAR CONSTANT
     nMaxTrips: UINT := 5;
     // Decrease trip count by 1 after this much time has passed
     tTripReset: TIME := T#1s;
+    // Machine mode value for NC (normal conducting, copper linac) operation.
+    // Machine mode is broadcast by the line arbiter in the beam parameters;
+    // see FB_MachineModeFromEPICS in lcls-twincat-pmps for the full list of values.
+    nMachineModeNC: USINT := 0;
+    // Machine mode value for SC (superconducting linac) operation.
+    nMachineModeSC: USINT := 1;
 END_VAR
 VAR
     // If the beam parameters are wrong, it is a fault! This encompasses all unknown arbiter-related errors.
@@ -68,10 +74,10 @@ ffBeamParamsOk(
     io_fbFFHWO:=fbFFHWO);
 
 CASE PMPS_GVL.stCurrentBeamParameters.nMachineMode OF
-    // NC mode
-    1: ffZeroRate.i_xOK := stCurrentBeamReq.nRate > 0;
-    // SC mode
-    2: ffZeroRate.i_xOK := stCurrentBeamReq.nBCRange > 0;
+    // NC mode: beam-off is a zero pulse rate
+    nMachineModeNC: ffZeroRate.i_xOK := stCurrentBeamReq.nRate > 0;
+    // SC mode: beam-off is a zero beam class range
+    nMachineModeSC: ffZeroRate.i_xOK := stCurrentBeamReq.nBCRange > 0;
 ELSE
     // Ambiguous or new mode
     ffZeroRate.i_xOK := stCurrentBeamReq.nRate > 0 AND stCurrentBeamReq.nBCRange > 0;
@@ -97,7 +103,7 @@ ffUnknown(
 ftTripCount(CLK:=ffBeamParamsOk.i_xOK);
 
 IF ftTripCount.Q THEN
-    nTripCount := MIN(nTripCount + 1, 5);
+    nTripCount := MIN(nTripCount + 1, nMaxTrips);
 END_IF
 
 tonTripCount(
@@ -111,7 +117,7 @@ END_IF
 // This is required for non-autoresetting FBs to come up in a beam permitted state
 ffDebounce.i_xReset := bFirstCycle OR nTripCount=0;
 ffDebounce(
-    i_xOK := nTripCount < 5,
+    i_xOK := nTripCount < nMaxTrips,
     i_DevName := sDeviceName,
     i_Desc := 'Tripped beam parameter mismatch off/on too many times, hold off',
     i_TypeCode := E_MotionFFType.TOO_MANY_TRIPS,

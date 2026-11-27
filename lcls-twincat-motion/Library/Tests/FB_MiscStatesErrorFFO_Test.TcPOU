@@ -12,6 +12,7 @@ END_VAR
       <ST><![CDATA[
 TestBeamParamsNotOk();
 TestZeroRate();
+TestZeroRateMachineModes();
 TestUnknownState();
 TestTransitionState();
 TestDebounce();
@@ -237,6 +238,82 @@ fbFFHWO.EvaluateOutput();
 AssertFalse(
     fbFFHWO.q_xFastFaultOut,
     'Did not fault with zero rate',
+);
+
+TEST_FINISHED();
+]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="TestZeroRateMachineModes" Id="{d8475cb7-b99c-4a6d-bc19-ed7301d8253a}">
+      <Declaration><![CDATA[METHOD TestZeroRateMachineModes
+VAR_INST
+    fbMiscFFO: FB_MiscStatesErrorFFO;
+    fbArbiter: FB_Arbiter(6);
+    fbFFHWO: FB_HardwareFFOutput := (bAutoReset := TRUE);
+
+    stBeamReq: ST_BeamParams;
+END_VAR
+]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[
+TEST('TestZeroRateMachineModes');
+
+// Here the requested beam parameters double as the current beam parameters.
+// F_SafeBPCompare is trivially true for identical structs, so only the
+// zero-rate fast fault is in play in these cases.
+// The machine mode values are the ones broadcast by the line arbiter.
+
+// Mode 0 (NC): beam-off is a zero pulse rate, so a zero rate request trips.
+PMPS_GVL.stCurrentBeamParameters := PMPS_GVL.cstFullBeam;
+PMPS_GVL.stCurrentBeamParameters.nMachineMode := 0;
+PMPS_GVL.stCurrentBeamParameters.nRate := 0;
+stBeamReq := PMPS_GVL.stCurrentBeamParameters;
+fbMiscFFO(
+    fbArbiter:=fbArbiter,
+    fbFFHWO:=fbFFHWO,
+    stCurrentBeamReq:=stBeamReq,
+    bKnownState:=TRUE,
+    nTransitionID:=6,
+);
+fbFFHWO.EvaluateOutput();
+AssertFalse(
+    fbFFHWO.q_xFastFaultOut,
+    'NC mode: zero rate request did not trip the zero-rate fast fault',
+);
+
+// Mode 1 (SC): beam-off is a zero beam class range, so a zero beam class trips.
+PMPS_GVL.stCurrentBeamParameters.nMachineMode := 1;
+PMPS_GVL.stCurrentBeamParameters.nRate := UDINT#1000000;
+PMPS_GVL.stCurrentBeamParameters.nBCRange := 0;
+stBeamReq := PMPS_GVL.stCurrentBeamParameters;
+fbMiscFFO(
+    fbArbiter:=fbArbiter,
+    fbFFHWO:=fbFFHWO,
+    stCurrentBeamReq:=stBeamReq,
+    bKnownState:=TRUE,
+    nTransitionID:=6,
+);
+fbFFHWO.EvaluateOutput();
+AssertFalse(
+    fbFFHWO.q_xFastFaultOut,
+    'SC mode: zero beam class range request did not trip the zero-rate fast fault',
+);
+
+// Mode 1 (SC): a zero rate alone is not beam-off, so this must not trip.
+PMPS_GVL.stCurrentBeamParameters.nRate := 0;
+PMPS_GVL.stCurrentBeamParameters.nBCRange := 2#0111_1111_1111_1111;
+stBeamReq := PMPS_GVL.stCurrentBeamParameters;
+fbMiscFFO(
+    fbArbiter:=fbArbiter,
+    fbFFHWO:=fbFFHWO,
+    stCurrentBeamReq:=stBeamReq,
+    bKnownState:=TRUE,
+    nTransitionID:=6,
+);
+fbFFHWO.EvaluateOutput();
+AssertTrue(
+    fbFFHWO.q_xFastFaultOut,
+    'SC mode: zero rate request with a beam class range tripped the zero-rate fast fault',
 );
 
 TEST_FINISHED();
