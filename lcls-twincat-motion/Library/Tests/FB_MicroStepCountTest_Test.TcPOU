@@ -1,0 +1,338 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="FB_MicroStepCountTest_Test" Id="{b4d61c8a-2f75-4e39-8a10-c75d3e9b2f10}" SpecialFunc="None">
+    <Declaration><![CDATA[FUNCTION_BLOCK FB_MicroStepCountTest_Test EXTENDS TcUnit.FB_TestSuite
+(*
+    Unit tests for the request validation in FB_MicroStepCountTest.
+
+    Purpose:
+        Prove that an unusable or out-of-range fStepSize / fVelocity is rejected or
+        clamped before MC_MoveRelative is allowed to command the axis.
+
+    Usage:
+        Instantiate in PRG_TEST with the other test suites; the tests run in sequence.
+        bExecute is kept FALSE and the axis reference is left unlinked, so only the
+        validation path is exercised and no motion is commanded.
+
+    Objectives:
+        - Cover the reject path (zero/negative velocity, zero step size, no known
+          limit) and the clamp path (velocity and step size above the configured cap).
+
+    History:
+        - 2026-11-27: initial tests for the move request validation.
+*)
+VAR
+    // Axis reference is intentionally unlinked: the tests never command motion.
+    stAxis: AXIS_REF;
+    fbMicroStepTest: FB_MicroStepCountTest;
+    nTestNumber: UINT;
+    bOneTestDone: BOOL;
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[(* Advance to the next test as soon as the current one finished. *)
+IF bOneTestDone THEN
+    bOneTestDone := FALSE;
+    nTestNumber := nTestNumber + 1;
+END_IF
+
+(* Each test configures its own request, calls the block and asserts on the outputs. *)
+CASE nTestNumber OF
+    0: ;
+    1: TestRejectZeroVelocity();
+    2: TestRejectNegativeVelocity();
+    3: TestRejectZeroStepSize();
+    4: TestRejectWithoutVelocityLimit();
+    5: TestRejectWithoutStepSizeLimit();
+    6: TestClampVelocityToLimit();
+    7: TestClampStepSizeToLimit();
+    8: TestClampNegativeStepSizeToLimit();
+    9: TestAcceptInRangeRequest();
+END_CASE]]></ST>
+    </Implementation>
+    <Method Name="TestRejectZeroVelocity" Id="{c5e72d9b-3a86-4f40-9b21-d86e4fac3a21}">
+      <Declaration><![CDATA[METHOD PRIVATE TestRejectZeroVelocity
+(*
+    A zero velocity is not a valid MC_MoveRelative request and must be rejected.
+    bInit applies the request on the first cycle, the assertion runs on the next one.
+*)
+VAR_INST
+    bInit: BOOL := TRUE;
+END_VAR
+]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[TEST('TestRejectZeroVelocity');
+IF bInit THEN
+    fbMicroStepTest.bExecute := FALSE;
+    fbMicroStepTest.fVelocity := 0.0;
+    fbMicroStepTest.fStepSize := 1.0;
+    fbMicroStepTest.fMaxVelocity := 100.0;
+    fbMicroStepTest.fMaxStepSize := 10.0;
+    bInit := FALSE;
+    RETURN;
+END_IF
+
+fbMicroStepTest(Axis:=stAxis);
+
+AssertTrue(Condition:=fbMicroStepTest.bError, Message:='A zero velocity must be rejected.');
+AssertTrue(Condition:=fbMicroStepTest.nErrorId = E_LCLSMotionError.INVALID_VELOCITY, Message:='A zero velocity must report INVALID_VELOCITY.');
+AssertEquals_LREAL(Expected:=0.0, Actual:=fbMicroStepTest.fVelocityCmd, Delta:=0.0, Message:='No velocity may be commanded for a rejected request.');
+AssertEquals_LREAL(Expected:=0.0, Actual:=fbMicroStepTest.fStepSizeCmd, Delta:=0.0, Message:='No step may be commanded for a rejected request.');
+
+TEST_FINISHED();
+bOneTestDone := TRUE;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="TestRejectNegativeVelocity" Id="{d6f83eac-4b97-4051-ac32-e97f50bd4b32}">
+      <Declaration><![CDATA[METHOD PRIVATE TestRejectNegativeVelocity
+(*
+    A negative velocity is not commandable: the direction comes from the step sign.
+*)
+VAR_INST
+    bInit: BOOL := TRUE;
+END_VAR
+]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[TEST('TestRejectNegativeVelocity');
+IF bInit THEN
+    fbMicroStepTest.bExecute := FALSE;
+    fbMicroStepTest.fVelocity := -50.0;
+    fbMicroStepTest.fStepSize := 1.0;
+    fbMicroStepTest.fMaxVelocity := 100.0;
+    fbMicroStepTest.fMaxStepSize := 10.0;
+    bInit := FALSE;
+    RETURN;
+END_IF
+
+fbMicroStepTest(Axis:=stAxis);
+
+AssertTrue(Condition:=fbMicroStepTest.bError, Message:='A negative velocity must be rejected.');
+AssertTrue(Condition:=fbMicroStepTest.nErrorId = E_LCLSMotionError.INVALID_VELOCITY, Message:='A negative velocity must report INVALID_VELOCITY.');
+AssertEquals_LREAL(Expected:=0.0, Actual:=fbMicroStepTest.fVelocityCmd, Delta:=0.0, Message:='No velocity may be commanded for a rejected request.');
+
+TEST_FINISHED();
+bOneTestDone := TRUE;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="TestRejectZeroStepSize" Id="{e709a4bd-5ca8-4162-bd43-fa8061ce5c43}">
+      <Declaration><![CDATA[METHOD PRIVATE TestRejectZeroStepSize
+(*
+    A zero step size would command a move of unknown length and must be rejected.
+*)
+VAR_INST
+    bInit: BOOL := TRUE;
+END_VAR
+]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[TEST('TestRejectZeroStepSize');
+IF bInit THEN
+    fbMicroStepTest.bExecute := FALSE;
+    fbMicroStepTest.fVelocity := 10.0;
+    fbMicroStepTest.fStepSize := 0.0;
+    fbMicroStepTest.fMaxVelocity := 100.0;
+    fbMicroStepTest.fMaxStepSize := 10.0;
+    bInit := FALSE;
+    RETURN;
+END_IF
+
+fbMicroStepTest(Axis:=stAxis);
+
+AssertTrue(Condition:=fbMicroStepTest.bError, Message:='A zero step size must be rejected.');
+AssertTrue(Condition:=fbMicroStepTest.nErrorId = E_LCLSMotionError.INVALID_STEP_SIZE, Message:='A zero step size must report INVALID_STEP_SIZE.');
+AssertEquals_LREAL(Expected:=0.0, Actual:=fbMicroStepTest.fStepSizeCmd, Delta:=0.0, Message:='No step may be commanded for a rejected request.');
+
+TEST_FINISHED();
+bOneTestDone := TRUE;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="TestRejectWithoutVelocityLimit" Id="{f81ab5ce-6db9-4273-ce54-0b9172df6d54}">
+      <Declaration><![CDATA[METHOD PRIVATE TestRejectWithoutVelocityLimit
+(*
+    Without a configured velocity cap and without a readable axis parameter set the
+    velocity cannot be checked, so the request must be rejected.
+*)
+VAR_INST
+    bInit: BOOL := TRUE;
+END_VAR
+]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[TEST('TestRejectWithoutVelocityLimit');
+IF bInit THEN
+    fbMicroStepTest.bExecute := FALSE;
+    fbMicroStepTest.fVelocity := 10.0;
+    fbMicroStepTest.fStepSize := 1.0;
+    fbMicroStepTest.fMaxVelocity := 0.0;
+    fbMicroStepTest.fMaxStepSize := 10.0;
+    bInit := FALSE;
+    RETURN;
+END_IF
+
+fbMicroStepTest(Axis:=stAxis);
+
+AssertTrue(Condition:=fbMicroStepTest.bError, Message:='An unchecked velocity must be rejected.');
+AssertTrue(Condition:=fbMicroStepTest.nErrorId = E_LCLSMotionError.INVALID_VELOCITY, Message:='An unchecked velocity must report INVALID_VELOCITY.');
+
+TEST_FINISHED();
+bOneTestDone := TRUE;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="TestRejectWithoutStepSizeLimit" Id="{092bc6df-7eca-4384-df65-1ca283ea7e65}">
+      <Declaration><![CDATA[METHOD PRIVATE TestRejectWithoutStepSizeLimit
+(*
+    Without a configured step cap and without a readable axis parameter set the step
+    size cannot be checked, so the request must be rejected.
+*)
+VAR_INST
+    bInit: BOOL := TRUE;
+END_VAR
+]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[TEST('TestRejectWithoutStepSizeLimit');
+IF bInit THEN
+    fbMicroStepTest.bExecute := FALSE;
+    fbMicroStepTest.fVelocity := 10.0;
+    fbMicroStepTest.fStepSize := 1.0;
+    fbMicroStepTest.fMaxVelocity := 100.0;
+    fbMicroStepTest.fMaxStepSize := 0.0;
+    bInit := FALSE;
+    RETURN;
+END_IF
+
+fbMicroStepTest(Axis:=stAxis);
+
+AssertTrue(Condition:=fbMicroStepTest.bError, Message:='An unchecked step size must be rejected.');
+AssertTrue(Condition:=fbMicroStepTest.nErrorId = E_LCLSMotionError.INVALID_STEP_SIZE, Message:='An unchecked step size must report INVALID_STEP_SIZE.');
+
+TEST_FINISHED();
+bOneTestDone := TRUE;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="TestClampVelocityToLimit" Id="{1a3cd7e0-8fdb-4495-e076-2db394fb8f76}">
+      <Declaration><![CDATA[METHOD PRIVATE TestClampVelocityToLimit
+(*
+    A velocity above the configured cap is clamped down to the cap and reported.
+*)
+VAR_INST
+    bInit: BOOL := TRUE;
+END_VAR
+]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[TEST('TestClampVelocityToLimit');
+IF bInit THEN
+    fbMicroStepTest.bExecute := FALSE;
+    fbMicroStepTest.fVelocity := 500.0;
+    fbMicroStepTest.fStepSize := 1.0;
+    fbMicroStepTest.fMaxVelocity := 100.0;
+    fbMicroStepTest.fMaxStepSize := 10.0;
+    bInit := FALSE;
+    RETURN;
+END_IF
+
+fbMicroStepTest(Axis:=stAxis);
+
+AssertFalse(Condition:=fbMicroStepTest.bError, Message:='A velocity above the cap must be clamped, not rejected.');
+AssertTrue(Condition:=fbMicroStepTest.bLimited, Message:='A clamped velocity must be reported as limited.');
+AssertEquals_LREAL(Expected:=100.0, Actual:=fbMicroStepTest.fVelocityCmd, Delta:=0.0, Message:='The velocity must be clamped to the configured cap.');
+AssertEquals_LREAL(Expected:=1.0, Actual:=fbMicroStepTest.fStepSizeCmd, Delta:=0.0, Message:='The in-range step size must be passed through unchanged.');
+
+TEST_FINISHED();
+bOneTestDone := TRUE;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="TestClampStepSizeToLimit" Id="{2b4de8f1-90ec-45a6-f187-3ec4a50c9087}">
+      <Declaration><![CDATA[METHOD PRIVATE TestClampStepSizeToLimit
+(*
+    A step size above the configured cap is clamped down to the cap and reported.
+*)
+VAR_INST
+    bInit: BOOL := TRUE;
+END_VAR
+]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[TEST('TestClampStepSizeToLimit');
+IF bInit THEN
+    fbMicroStepTest.bExecute := FALSE;
+    fbMicroStepTest.fVelocity := 50.0;
+    fbMicroStepTest.fStepSize := 5.0;
+    fbMicroStepTest.fMaxVelocity := 100.0;
+    fbMicroStepTest.fMaxStepSize := 1.0;
+    bInit := FALSE;
+    RETURN;
+END_IF
+
+fbMicroStepTest(Axis:=stAxis);
+
+AssertFalse(Condition:=fbMicroStepTest.bError, Message:='A step size above the cap must be clamped, not rejected.');
+AssertTrue(Condition:=fbMicroStepTest.bLimited, Message:='A clamped step size must be reported as limited.');
+AssertEquals_LREAL(Expected:=1.0, Actual:=fbMicroStepTest.fStepSizeCmd, Delta:=0.0, Message:='The step size must be clamped to the configured cap.');
+AssertEquals_LREAL(Expected:=50.0, Actual:=fbMicroStepTest.fVelocityCmd, Delta:=0.0, Message:='The in-range velocity must be passed through unchanged.');
+
+TEST_FINISHED();
+bOneTestDone := TRUE;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="TestClampNegativeStepSizeToLimit" Id="{3c5ef902-a1fd-46b7-0298-4fd5b61da198}">
+      <Declaration><![CDATA[METHOD PRIVATE TestClampNegativeStepSizeToLimit
+(*
+    Clamping a negative step must keep its direction, so the axis still steps backwards.
+*)
+VAR_INST
+    bInit: BOOL := TRUE;
+END_VAR
+]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[TEST('TestClampNegativeStepSizeToLimit');
+IF bInit THEN
+    fbMicroStepTest.bExecute := FALSE;
+    fbMicroStepTest.fVelocity := 50.0;
+    fbMicroStepTest.fStepSize := -5.0;
+    fbMicroStepTest.fMaxVelocity := 100.0;
+    fbMicroStepTest.fMaxStepSize := 1.0;
+    bInit := FALSE;
+    RETURN;
+END_IF
+
+fbMicroStepTest(Axis:=stAxis);
+
+AssertFalse(Condition:=fbMicroStepTest.bError, Message:='A negative step size above the cap must be clamped, not rejected.');
+AssertTrue(Condition:=fbMicroStepTest.bLimited, Message:='A clamped step size must be reported as limited.');
+AssertEquals_LREAL(Expected:=-1.0, Actual:=fbMicroStepTest.fStepSizeCmd, Delta:=0.0, Message:='The clamped step size must keep the requested direction.');
+
+TEST_FINISHED();
+bOneTestDone := TRUE;]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="TestAcceptInRangeRequest" Id="{4d6f0a13-b20e-47c8-13a9-50e6c72eb2a9}">
+      <Declaration><![CDATA[METHOD PRIVATE TestAcceptInRangeRequest
+(*
+    A request inside both limits must be passed through untouched and not be flagged.
+*)
+VAR_INST
+    bInit: BOOL := TRUE;
+END_VAR
+]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[TEST('TestAcceptInRangeRequest');
+IF bInit THEN
+    fbMicroStepTest.bExecute := FALSE;
+    fbMicroStepTest.fVelocity := 50.0;
+    fbMicroStepTest.fStepSize := 0.5;
+    fbMicroStepTest.fMaxVelocity := 100.0;
+    fbMicroStepTest.fMaxStepSize := 1.0;
+    bInit := FALSE;
+    RETURN;
+END_IF
+
+fbMicroStepTest(Axis:=stAxis);
+
+AssertFalse(Condition:=fbMicroStepTest.bError, Message:='An in-range request must be accepted.');
+AssertFalse(Condition:=fbMicroStepTest.bLimited, Message:='An in-range request must not be reported as limited.');
+AssertTrue(Condition:=fbMicroStepTest.nErrorId = 0, Message:='An accepted request must not report an error id.');
+AssertEquals_LREAL(Expected:=50.0, Actual:=fbMicroStepTest.fVelocityCmd, Delta:=0.0, Message:='The accepted velocity must be passed through.');
+AssertEquals_LREAL(Expected:=0.5, Actual:=fbMicroStepTest.fStepSizeCmd, Delta:=0.0, Message:='The accepted step size must be passed through.');
+
+TEST_FINISHED();
+bOneTestDone := TRUE;]]></ST>
+      </Implementation>
+    </Method>
+  </POU>
+</TcPlcObject>

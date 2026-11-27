@@ -1,14 +1,58 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <TcPlcObject Version="1.1.0.1">
   <POU Name="FB_MicroStepCountTest" Id="{b953130d-6adb-468e-991b-b389a0e4364b}" SpecialFunc="None">
-    <Declaration><![CDATA[FUNCTION_BLOCK FB_MicroStepCountTest
+    <Declaration><![CDATA[(*
+    Microstep counting test for motor commissioning.
+
+    Purpose:
+        Step an axis a fixed distance repeatedly and compare the number of microsteps
+        counted from the encoder against the theoretical number, so a mis-set encoder
+        scaling, microstep size or step mode shows up during commissioning.
+
+    Usage:
+        - Wire Axis to the axis under test.
+        - Set fStepSize (signed, engineering units), fVelocity (EU/s), nSteps,
+          fMicroStep (EU) and tSettleTime, then raise bExecute.
+        - Every cycle the request is validated before anything is commanded:
+              fVelocity is clamped to the lowest of fMaxVelocity and the axis
+              parameter fVeloMaximum;
+              fStepSize is clamped to fMaxStepSize and rejected when the step would
+              cross an enabled soft limit.
+          fStepSizeCmd / fVelocityCmd carry what was actually commanded, bLimited
+          reports that a clamp happened and bError / nErrorId report a rejected
+          request. No motion is commanded while bError is TRUE.
+        - Results: nStepsCounted, nTheorySteps, fPercent, fEstMicroSize.
+
+    Objectives:
+        - Never command a velocity or a step size that has not been checked against
+          the configured limits and the axis' own parameters.
+
+    History:
+        - 2026-11-27: validate and clamp fStepSize / fVelocity against the configured
+          limits and the axis parameters before commanding MC_MoveRelative.
+*)
+FUNCTION_BLOCK FB_MicroStepCountTest
 VAR_INPUT
+    // TRUE to run the step test, FALSE to sit idle and re-arm the start position.
     bExecute: BOOL;
+    // Requested step distance in engineering units, the sign selects the direction.
     fStepSize: LREAL;
+    // Number of steps to take before the test completes.
     nSteps: UINT;
+    // Expected size of one microstep in engineering units.
     fMicroStep: LREAL;
+    // Requested move velocity in engineering units per second.
     fVelocity: LREAL;
+    // Time to wait after each move before the encoder position is sampled.
     tSettleTime: TIME;
+    // Configured cap on |fStepSize| in engineering units, 0.0 disables this cap and
+    // only the axis soft limit travel is checked.
+    fMaxStepSize: LREAL := 0.0;
+    // Configured cap on fVelocity in engineering units per second, 0.0 disables this
+    // cap and only the axis parameter fVeloMaximum is checked.
+    fMaxVelocity: LREAL := 0.0;
+    // How often the axis parameters used for the limit checks are refreshed.
+    tAxisParamRefresh: TIME := T#10S;
 END_VAR
 VAR_IN_OUT
     Axis: AXIS_REF;
@@ -18,6 +62,18 @@ VAR_OUTPUT
     nTheorySteps: UINT;
     fPercent: LREAL;
     fEstMicroSize: LREAL;
+    // Step distance that passed validation and was sent to MC_MoveRelative, in EU.
+    fStepSizeCmd: LREAL;
+    // Velocity that passed validation and was sent to MC_MoveRelative, in EU/s.
+    fVelocityCmd: LREAL;
+    // TRUE while the requested values had to be clamped into the allowed range.
+    bLimited: BOOL;
+    // TRUE while the requested values are rejected, no motion is commanded.
+    bError: BOOL;
+    // Reason for the rejection, see E_LCLSMotionError. 0 while the request is accepted.
+    nErrorId: UDINT;
+    // TRUE once the axis parameters the limits are derived from have been read.
+    bAxisParamValid: BOOL;
 END_VAR
 VAR
     fbMoveRel: MC_MoveRelative;
@@ -35,13 +91,118 @@ VAR
     fStepChange: LREAL;
 
     fStepSum: LREAL;
+
+    // Axis parameter read that the velocity and travel limits come from.
+    fbReadAxisParams: MC_ReadParameterSet;
+    stAxisParameters: ST_AxisParameterSet;
+    fbAxisParamTimer: TON;
+    bReadAxisParams: BOOL;
+
+    // Request validation
+    fVelocityLimit: LREAL;
+    fStepLimit: LREAL;
+    bStepLimitKnown: BOOL;
+    bSoftLimitCheck: BOOL;
+    bTravelLimitOk: BOOL;
+    fTravel: LREAL;
 END_VAR]]></Declaration>
     <Implementation>
-      <ST><![CDATA[// Motion FB
+      <ST><![CDATA[(* Axis parameters: the velocity rating and the soft limits that the request is
+   checked against. Refreshed periodically so a changed NC configuration is picked
+   up without a PLC restart. *)
+fbAxisParamTimer(IN:=NOT bReadAxisParams,
+    PT:=tAxisParamRefresh);
+bReadAxisParams S= fbAxisParamTimer.Q;
+fbReadAxisParams(Parameter:=stAxisParameters,
+    Axis:=Axis,
+    Execute:=bReadAxisParams);
+IF fbReadAxisParams.Done THEN
+    // Only a successful read makes the limits usable. A failed read keeps the last
+    // known good parameter set, and at startup leaves the limits unusable.
+    bAxisParamValid := TRUE;
+END_IF
+IF fbReadAxisParams.Done OR fbReadAxisParams.Error THEN
+    bReadAxisParams := FALSE;
+END_IF
+
+(* Request validation: nothing is commanded unless it passed the checks below. *)
+bError := FALSE;
+nErrorId := 0;
+bLimited := FALSE;
+fStepSizeCmd := 0.0;
+fVelocityCmd := 0.0;
+fVelocityLimit := 0.0;
+fStepLimit := 0.0;
+bStepLimitKnown := FALSE;
+bSoftLimitCheck := FALSE;
+fTravel := 0.0;
+
+// Velocity limit: the lowest of the configured cap and the axis rating, so a
+// mis-set fMaxVelocity can never raise the velocity above the axis maximum.
+IF fMaxVelocity > 0.0 THEN
+    fVelocityLimit := fMaxVelocity;
+END_IF
+IF bAxisParamValid AND stAxisParameters.fVeloMaximum > 0.0 THEN
+    IF (fVelocityLimit <= 0.0) OR (stAxisParameters.fVeloMaximum < fVelocityLimit) THEN
+        fVelocityLimit := stAxisParameters.fVeloMaximum;
+    END_IF
+END_IF
+
+// Step size limit: the configured cap on the step magnitude...
+IF fMaxStepSize > 0.0 THEN
+    fStepLimit := fMaxStepSize;
+    bStepLimitKnown := TRUE;
+END_IF
+
+// ...and the travel left before the soft limit in the requested direction. The
+// verdict is only refreshed while no move is in flight: during a move ActPos walks
+// towards the limit, and that must not abort a step that was already accepted.
+IF NOT fbMoveRel.Busy THEN
+    bTravelLimitOk := NOT bSoftLimitCheck OR (fTravel >= ABS(fStepSize));
+END_IF
+IF bAxisParamValid AND fStepSize > 0.0 AND stAxisParameters.bEncEnableSoftEndMaxControl.0 THEN
+    fTravel := stAxisParameters.fEncSoftEndMax - Axis.NcToPlc.ActPos;
+    bSoftLimitCheck := TRUE;
+ELSIF bAxisParamValid AND fStepSize < 0.0 AND stAxisParameters.bEncEnableSoftEndMinControl.0 THEN
+    fTravel := Axis.NcToPlc.ActPos - stAxisParameters.fEncSoftEndMin;
+    bSoftLimitCheck := TRUE;
+END_IF
+
+IF NOT (fVelocity > 0.0) THEN
+    // Zero, negative and NaN velocities are never a valid MC_MoveRelative request.
+    bError := TRUE;
+    nErrorId := E_LCLSMotionError.INVALID_VELOCITY;
+ELSIF fVelocityLimit <= 0.0 THEN
+    // Without a known velocity limit the request cannot be checked.
+    bError := TRUE;
+    nErrorId := E_LCLSMotionError.INVALID_VELOCITY;
+ELSIF NOT (fStepSize > 0.0 OR fStepSize < 0.0) THEN
+    // Zero and NaN step sizes would command a move of unknown length.
+    bError := TRUE;
+    nErrorId := E_LCLSMotionError.INVALID_STEP_SIZE;
+ELSIF NOT bStepLimitKnown THEN
+    // Without a known step limit the request cannot be checked.
+    bError := TRUE;
+    nErrorId := E_LCLSMotionError.INVALID_STEP_SIZE;
+ELSIF NOT bTravelLimitOk THEN
+    // The step would cross the soft limit: reject instead of commanding a move that
+    // the NC can only answer with a limit fault.
+    bError := TRUE;
+    nErrorId := E_LCLSMotionError.INVALID_STEP_SIZE;
+END_IF
+
+IF NOT bError THEN
+    // Clamp the values that are merely out of range and report that we did so.
+    fVelocityCmd := MIN(fVelocity, fVelocityLimit);
+    fStepSizeCmd := LIMIT(-fStepLimit, fStepSize, fStepLimit);
+    bLimited := (fVelocityCmd <> fVelocity) OR (fStepSizeCmd <> fStepSize);
+END_IF
+
+// Motion FB, commanded only with the validated values from above.
 fbMoveRel(Axis:=Axis,
-    Execute:=bDoMove,
-    Distance:=fStepSize,
-    Velocity:=fVelocity);
+    Execute:=bDoMove AND NOT bError,
+    Distance:=fStepSizeCmd,
+    Velocity:=fVelocityCmd);
 
 // Settle time
 fbSettleTimer(IN:=fbMoveRel.Done,
@@ -69,7 +230,7 @@ END_IF
 IF fbSettleTimer.Q THEN
     fStepChange := fAvgPos - fPrevPos;
     // Invert fStepChange if we were doing negative steps
-    IF fStepSize < 0 THEN
+    IF fStepSizeCmd < 0 THEN
         fStepChange := fStepChange * -1;
     END_IF
     IF fStepChange > fMicroStep * 0.5 THEN

@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <TcPlcObject Version="1.1.0.1">
   <DUT Name="E_LCLSMotionError" Id="{ddea4357-8fae-44da-b5b7-bd2ca001f059}">
     <Declaration><![CDATA[{attribute 'qualified_only'}
@@ -9,6 +9,10 @@ TYPE E_LCLSMotionError :
     UNSAFE := 16#7901,
     INVALID := 16#7902,
     MCS2_FAULT := 16#7903,
+    // Requested move velocity is not positive or exceeds the configured/axis limit.
+    INVALID_VELOCITY := 16#7904,
+    // Requested step size is zero/undefined, unbounded or crosses the soft limit.
+    INVALID_STEP_SIZE := 16#7905,
     TEST := 16#FFFF
 ) UDINT;
 END_TYPE

@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <TcPlcObject Version="1.1.0.1">
   <POU Name="F_MotionErrorCodeLookup" Id="{71c436f2-8bc4-46b7-82a0-e1e338c02dd9}" SpecialFunc="None">
     <Declaration><![CDATA[FUNCTION F_MotionErrorCodeLookup : STRING
@@ -34,6 +34,8 @@ END_VAR
     E_LCLSMotionError.UNSAFE: msg:='Position state unsafe';
     E_LCLSMotionError.INVALID: msg:='Position state invalid';
     E_LCLSMotionError.MCS2_FAULT: msg:='MCS2 drive fault, NC did not latch';
+    E_LCLSMotionError.INVALID_VELOCITY: msg:='Requested move velocity is not positive or exceeds the axis/configured limit';
+    E_LCLSMotionError.INVALID_STEP_SIZE: msg:='Requested step size is zero, unlimited or beyond the soft limit travel';
     E_LCLSMotionError.TEST: msg:='Fake testing error';
 
     // Fallbacks
