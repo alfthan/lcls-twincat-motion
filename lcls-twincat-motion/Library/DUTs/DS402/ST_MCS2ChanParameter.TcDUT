@@ -1,13 +1,53 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <TcPlcObject Version="1.1.0.1">
   <DUT Name="ST_MCS2ChanParameter" Id="{ed228747-71e3-413e-a649-3dc97b8c806c}">
     <Declaration><![CDATA[TYPE ST_MCS2ChanParameter :
+(*
+    Purpose:
+        Parameter and telemetry block of one SmarAct MCS2 positioner channel:
+        the tunables the operator may change over EPICS (step mode, safe
+        direction, referencing and calibration options) plus the drive values
+        read back for diagnostics.
+
+    Usage:
+        Instantiated once per stage (owned by FB_MotionStageMCS2 as
+        stChanParams) and passed by reference to FB_WriteChanParameters,
+        FB_WriteHomeParameters, FB_WriteStepModeParameters,
+        FB_WriteCalibrationParameters and FB_ReadChanParameters, which write the
+        members to the drive over CoE/SDO and read the telemetry back. Every
+        member that crosses into EPICS carries a pytmc pragma; the
+        {attribute 'hide'} members are PLC-internal bookkeeping and are not
+        published.
+
+    Objectives:
+        - One declaration for everything that is tuned, persisted and
+          published for a channel, so a new parameter is added in one place.
+        - Meaning and units are stated on every member: steps, drive position
+          units (counts), hertz, percent, milliseconds, seconds and EGU.
+          Several of these values are EPICS-exposed tunables, so an unstated
+          unit is a configuration hazard rather than a cosmetic omission.
+        - Values that are converted before the SDO write say so, and name the
+          writer that clamps or scales them, so a raw member value is never
+          mistaken for the value the drive finally sees.
+
+    History:
+        2025-10-28  Yann Stephen Mandza  Created with the DS402/MCS2 homing,
+                                         channel-state and functional-split
+                                         refactor.
+        2026-11-27  Audit fix            DUT header and a comment stating the
+                                         meaning and units of every member
+                                         added (convention conv_321640e095c0).
+                                         No declaration or behaviour change.
+*)
 STRUCT
     {attribute 'pytmc' := '
         pv: STEP_COUNT
         io: io
         field: DESC Open Loop Step Count
     '}
+    // Open-loop step count applied by the next step move, in drive position
+    // units (steps). Sign selects the direction (>0 forward, <0 reverse); the
+    // step-mode writer clamps the magnitude to +/-1000 steps before the SDO write.
     nChanStep	: DINT := 500;
 
     {attribute 'pytmc' := '
@@ -15,6 +55,11 @@ STRUCT
         io: io
         field: DESC Step scale factor
     '}
+    // Open-loop step scale factor: engineering units travelled by one step
+    // command (EGU/step) for the nominal positioner, default 827.15. Published
+    // for the operator and persistence only - no PLC logic reads it today, so
+    // changing it does not rescale a step move (that conversion uses
+    // fScalingFactor, EGU per encoder count, in FB_MotionStageMCS2).
     nChanStepEgu	: LREAL := 827.15;
 
     {attribute 'pytmc' := '
@@ -22,6 +67,9 @@ STRUCT
         io: io
         field: DESC Step Frequency
     '}
+    // Open-loop step frequency applied by the next step move, in hertz (step
+    // pulses per second). FB_WriteStepModeParameters and FB_WriteChanParameters
+    // clamp it to 500..1000 Hz before the SDO write to object 0x2024.
     nChanStepFreq	: UINT := 500;
 
     {attribute 'pytmc' := '
@@ -29,6 +77,10 @@ STRUCT
         io: io
         field: DESC Step Amplitude
     '}
+    // Open-loop step amplitude as a percentage of the drive's full-scale step
+    // voltage (0..100 %), default 50 %. The step-mode writers clamp it to
+    // 50..100 % and multiply by 655.35 to get the 16-bit value written to
+    // object 0x2023 (100 % = 65535).
     nChanStepAmp	: UINT := 50;
 
     {attribute 'pytmc' := '
@@ -36,6 +88,9 @@ STRUCT
         io: io
         field: DESC Close loop hold time
     '}
+    // Closed-loop position hold time after a move completes, in milliseconds
+    // (30000 ms = 30 s). FB_MotionStageMCS2 loads it into tonHoldTime through
+    // UDINT_TO_TIME and drops the DURING_MOTION power enable when it expires.
     nHoldTime	: UDINT := 30000;
 
     {attribute 'pytmc' := '
@@ -45,6 +100,9 @@ STRUCT
         field: ONAM ENABLE
         field: DESC Used to disable close loop mode
     '}
+    // TRUE requests open-loop step mode instead of closed loop for the next move.
+    // Unitless flag (the PV is inverted: ZNAM DISABLE / ONAM ENABLE); read by
+    // FB_MCS2DriveManager and cleared by FB_MotionStageMCS2 once accepted.
     bStepMoveCmd	: BOOL;
 
     {attribute 'pytmc' := '
@@ -52,6 +110,8 @@ STRUCT
         io: io
         field: DESC Jog one step count forward
     '}
+    // Rising edge jogs one step forward (+nChanStep) with the step-mode
+    // parameters above; cleared by FB_MotionStageMCS2 once accepted. Unitless.
     bStepForwardCmd	: BOOL;
 
     {attribute 'pytmc' := '
@@ -59,6 +119,8 @@ STRUCT
         io: io
         field: DESC Jog one step count backward
     '}
+    // Rising edge jogs one step backward (-nChanStep) with the step-mode
+    // parameters above; cleared by FB_MotionStageMCS2 once accepted. Unitless.
     bStepReverseCmd	: BOOL;
 
     {attribute 'pytmc' := '
@@ -66,6 +128,8 @@ STRUCT
         io: io
         field: DESC Max Close Loop Freq
     '}
+    // Maximum closed-loop step frequency the drive may use, in hertz (steps/s);
+    // written to object 0x2001 and read back for verification.
     nMaxCloseLoopFreq     : UDINT;
 
     {attribute 'pytmc' := '
@@ -73,8 +137,12 @@ STRUCT
         io: io
         field: DESC Positioner Type
     '}
+    // Positioner type code reported by the drive (object 0x2000). Read-only,
+    // unitless vendor enumeration for the connected positioner/sensor.
     nPositionerType	: UDINT;
 
+    // Calibration options bit field written to object 0x2004 (unitless; the bits
+    // are decoded into the CAL_OPT:* read-only members further down).
     // Writable command pushed to 0x2004; the reader reads the drive value back
     // into it, so io:io serves both command and read-back on one symbol.
     {attribute 'pytmc' := '
@@ -89,8 +157,12 @@ STRUCT
         io: io
         field: DESC Sensor Power Mode
     '}
+    // Sensor power mode written to object 0x2007. Unitless vendor enumeration;
+    // FB_WriteChanParameters writes it when the value changes.
     nSensorPowerMode      : UDINT;
 
+    // Referencing options bit field written to object 0x200B (unitless; the bits
+    // are decoded into the REF_OPT:* read-only members further down).
     // Writable command pushed to 0x200B; the reader reads the drive value back
     // into it, so io:io serves both command and read-back on one symbol.
     {attribute 'pytmc' := '
@@ -105,6 +177,8 @@ STRUCT
         io: i
         field: DESC Reference Type
     '}
+    // Reference type reported by the drive (object 0x200A): which reference-mark
+    // sensor the positioner uses. Read-only, unitless.
     nReferenceType 	: UDINT;
 
     {attribute 'pytmc' := '
@@ -114,6 +188,10 @@ STRUCT
         field: ONAM BACKWARD
         field: DESC Safe direction (0x200C, R(W)*: written in Pre-Op)
     '}
+    // Safe direction used by calibration and referencing: FALSE = forward
+    // (ZNAM), TRUE = backward (ONAM). Unitless flag. Object 0x200C is
+    // write-in-Pre-Op only, so a change takes effect on the next drive state
+    // change, not immediately.
     nSafeDir	: BOOL;
 
     {attribute 'pytmc' := '
@@ -121,6 +199,8 @@ STRUCT
         io: i
         field: DESC Motor Load
     '}
+    // Motor load reported by the drive (object 0x200D), in percent of the rated
+    // motor load. Read-only telemetry, stored raw (no PLC scaling).
     nMotorLoad	: USINT;
 
     {attribute 'pytmc' := '
@@ -128,6 +208,8 @@ STRUCT
         io: io
         field: DESC Channel Type
     '}
+    // Channel type code reported by the drive (object 0x200F). Read-only,
+    // unitless vendor enumeration.
     nChannelType          : UDINT;
 
     {attribute 'pytmc' := '
@@ -135,6 +217,8 @@ STRUCT
         io: io
         field: DESC Logical Scale Offset
     '}
+    // Logical scale offset applied by the drive (object 0x2008), in drive
+    // position counts; the drive object is signed, the UDINT declaration is not.
     nLogicalScaleOffset   : UDINT; // should LINT
 
     {attribute 'pytmc' := '
@@ -142,6 +226,8 @@ STRUCT
         io: io
         field: DESC Logical Scale Inversion
     '}
+    // TRUE inverts the sign of the drive's logical scale (object 0x2009).
+    // Unitless flag.
     nLogicalScaleInv  	 : BOOL;
 
     {attribute 'pytmc' := '
@@ -149,8 +235,12 @@ STRUCT
         io: io
         field: DESC Calibrate command
     '}
+    // Rising edge requests a safe-direction calibration (referencing) move;
+    // consumed by FB_MCS2DriveManager and cleared by FB_MotionStageMCS2.
+    // Unitless command flag.
     bCalibrationCmd : BOOL;
 
+    // Unitless E_MCS2OpModeReq enum value.
     // Desired drive operating mode (source of truth). Default is closed-loop (CSP) absolute motion.
     {attribute 'pytmc' := '
         pv: OPMODE_REQ
@@ -164,6 +254,9 @@ STRUCT
         io: i
         field: DESC Channel configuration parameters.
     '}
+    // Channel state read back from object 0x2025: the raw state word plus the
+    // decoded flags (moving, closed loop, calibrated, referenced, end stop, ...).
+    // Unitless, see ST_ChannelState.
     stChannelState        : ST_ChannelState;
 
     {attribute 'pytmc' := '
@@ -171,6 +264,9 @@ STRUCT
         io: i
         field: DESC Vendor Homing Modes.
     '}
+    // Homing method used by the next HOME command (E_MCS2HomeMethod enum, default
+    // AutoMethod; unitless). Copied into nHomeMethod and written to object 0x6098;
+    // AutoMethod and CurrentPositionMethod are the methods this PLC runs itself.
     eHomeMode			  : E_MCS2HomeMethod := E_MCS2HomeMethod.AutoMethod;
 
     {attribute 'pytmc' := '
@@ -178,6 +274,9 @@ STRUCT
         io: i
         field: DESC Channel Temperature
     '}
+    // Channel temperature reported by the drive (object 0x2026). Read-only
+    // telemetry, stored raw: no PLC scaling to degrees is applied, so the value
+    // is in the drive's own temperature unit.
     nChannelTemp          : INT;
 
     {attribute 'pytmc' := '
@@ -185,6 +284,8 @@ STRUCT
         io: i
         field: DESC Movement Type
     '}
+    // Movement type reported by the drive (object 0x2003). Read-only, unitless
+    // vendor enumeration.
     nMovementType         : UDINT;
 
     {attribute 'pytmc' := '
@@ -192,6 +293,8 @@ STRUCT
         io: i
         field: DESC Base Unit
     '}
+    // Base unit code reported by the drive (object 0x2005): the unit that
+    // nBaseResolution is expressed in. Unitless vendor enumeration.
     nBaseUnit             : UDINT;
 
     {attribute 'pytmc' := '
@@ -199,6 +302,9 @@ STRUCT
         io: i
         field: DESC Base Resolution
     '}
+    // Base resolution reported by the drive (object 0x2006): the smallest
+    // position increment in the base unit, as the drive's own scaled integer
+    // (no PLC conversion is applied).
     nBaseResolution       : DINT;
 
     {attribute 'pytmc' := '
@@ -206,6 +312,8 @@ STRUCT
         io: io
         field: DESC Distance Code Inverted
     '}
+    // TRUE when the drive's distance code is inverted (object 0x2029).
+    // Unitless flag.
     nDistCodeInv          : BOOL;
 
     {attribute 'pytmc' := '
@@ -213,6 +321,7 @@ STRUCT
         io: io
         field: DESC Positioner Control Options
     '}
+    // Positioner control options written to object 0x2027. Unitless bit field.
     nPositionerCtrlOpt    : DWORD;
 
     {attribute 'pytmc' := '
@@ -220,6 +329,8 @@ STRUCT
         io: io
         field: DESC Actuator Mode
     '}
+    // Actuator mode written to object 0x2028 (open- or closed-loop actuator
+    // operation). Unitless vendor enumeration.
     nActuatorMode         : UDINT;
 
     {attribute 'pytmc' := '
@@ -227,6 +338,8 @@ STRUCT
         io: io
         field: DESC Motor Load Protection Threshold
     '}
+    // Motor load protection threshold written to object 0x202B, in percent of
+    // the rated motor load; the drive stops the positioner above it.
     nMotorLoadProt        : USINT;
 
     {attribute 'pytmc' := '
@@ -234,6 +347,8 @@ STRUCT
         io: i
         field: DESC Diagnostic Closed Loop Frequency (max)
     '}
+    // Diagnostic maximum closed-loop frequency reported by the drive
+    // (object 0x202A), in hertz (steps/s). Read-only.
     nDiagClfMax           : UDINT;
 
     {attribute 'pytmc' := '
@@ -241,6 +356,8 @@ STRUCT
         io: i
         field: DESC Diagnostic Closed Loop Frequency (avg)
     '}
+    // Diagnostic average closed-loop frequency reported by the drive
+    // (object 0x202A), in hertz (steps/s). Read-only.
     nDiagClfAvg           : UDINT;
 
     {attribute 'pytmc' := '
@@ -248,6 +365,8 @@ STRUCT
         io: i
         field: DESC Last MCS2 drive error code (0x603F)
     '}
+    // Last MCS2 drive error code (object 0x603F, the CiA 402 error register);
+    // 0 means no error. Unitless identifier, decoded into sMCS2ErrorMessage.
     nMCS2ErrorCode        : UINT;
 
     {attribute 'pytmc' := '
@@ -255,6 +374,7 @@ STRUCT
         io: i
         field: DESC Decoded MCS2 drive error
     '}
+    // Decoded text for nMCS2ErrorCode, published for the operator. No units.
     sMCS2ErrorMessage     : STRING;
 
     // Read-only decode of the drive's actual Referencing Options (REF_OPT,
@@ -264,42 +384,55 @@ STRUCT
         io: i
         field: DESC Ref start direction backward (bit0)
     '}
+    // REF_OPT bit 0 read-back: TRUE = referencing starts backwards. Unitless flag.
     bRefStartDirBackward  : BOOL;
     {attribute 'pytmc' := '
         pv: REF_OPT:REVERSE_DIR
         io: i
         field: DESC Ref reverse dir after 1st mark, multi-mark (bit1)
     '}
+    // REF_OPT bit 1 read-back: TRUE = reverse direction after the first reference
+    // mark (multi-mark positioners). Unitless flag.
     bRefReverseDir        : BOOL;
     {attribute 'pytmc' := '
         pv: REF_OPT:AUTO_ZERO
         io: i
         field: DESC Ref auto-zero on reference found (bit2)
     '}
+    // REF_OPT bit 2 read-back: TRUE = auto-zero the position when the reference
+    // is found. Unitless flag.
     bRefAutoZero          : BOOL;
     {attribute 'pytmc' := '
         pv: REF_OPT:ABORT_ENDSTOP
         io: i
         field: DESC Ref abort on end stop (bit3)
     '}
+    // REF_OPT bit 3 read-back: TRUE = abort referencing on an end stop.
+    // Unitless flag.
     bRefAbortOnEndStop    : BOOL;
     {attribute 'pytmc' := '
         pv: REF_OPT:CONT_ON_REF
         io: i
         field: DESC Ref continue on reference found (bit4)
     '}
+    // REF_OPT bit 4 read-back: TRUE = continue the referencing move after the
+    // reference is found. Unitless flag.
     bRefContinueOnRefFound: BOOL;
     {attribute 'pytmc' := '
         pv: REF_OPT:STOP_ON_REF
         io: i
         field: DESC Ref stop on reference found (bit5)
     '}
+    // REF_OPT bit 5 read-back: TRUE = stop when the reference is found.
+    // Unitless flag.
     bRefStopOnRefFound    : BOOL;
     {attribute 'pytmc' := '
         pv: REF_OPT:INVALIDATE
         io: i
         field: DESC Ref invalidate is-referenced flag (bit24)
     '}
+    // REF_OPT bit 24 read-back: TRUE = invalidate the is-referenced flag.
+    // Unitless flag.
     bRefInvalidate        : BOOL;
 
     // Read-only decode of the drive's actual Calibration Options (CAL_OPT,
@@ -309,115 +442,188 @@ STRUCT
         io: i
         field: DESC Calib move direction backward (bit0)
     '}
+    // CAL_OPT bit 0 read-back: TRUE = the calibration move runs backwards.
+    // Unitless flag.
     bCalDirBackward       : BOOL;
     {attribute 'pytmc' := '
         pv: CAL_OPT:DETECT_DCI
         io: i
         field: DESC Calib detect distance code inversion (bit1)
     '}
+    // CAL_OPT bit 1 read-back: TRUE = detect distance-code inversion during
+    // calibration. Unitless flag.
     bCalDetectDistCodeInv : BOOL;
     {attribute 'pytmc' := '
         pv: CAL_OPT:ADV_SENSOR
         io: i
         field: DESC Calib advanced sensor correction (bit2)
     '}
+    // CAL_OPT bit 2 read-back: TRUE = advanced sensor correction during
+    // calibration. Unitless flag.
     bCalAdvSensorCorr     : BOOL;
     {attribute 'pytmc' := '
         pv: CAL_OPT:LIM_TRAVEL
         io: i
         field: DESC Calib limited travel range, >1 endstop (bit8)
     '}
+    // CAL_OPT bit 8 read-back: TRUE = calibration is limited to the travel range
+    // instead of searching past an end stop. Unitless flag.
     bCalLimitedTravelRange: BOOL;
 
     {attribute 'hide'}
+    // Fast referencing search velocity written to object 0x6099, in drive
+    // position units per second (axis fRefVeloSearch EGU/s divided by the
+    // EGU-per-count scale factor).
     nHomeVeloFast         : UDINT;
     {attribute 'hide'}
+    // Minimum soft limit written to object 0x200E, in drive position counts
+    // (axis soft-end EGU divided by the EGU-per-count scale factor). 0 when
+    // soft-end control is disabled.
     nSoftLimMin           : LINT;
     {attribute 'hide'}
+    // Maximum soft limit written to object 0x200E, in drive position counts
+    // (axis soft-end EGU divided by the EGU-per-count scale factor). 0 when
+    // soft-end control is disabled.
     nSoftLimMax           : LINT;
     {attribute 'hide'}
+    // Slow referencing sync velocity written to object 0x6099, in drive
+    // position units per second (axis fRefVeloSync EGU/s divided by the
+    // EGU-per-count scale factor).
     nHomeVeloSlow         : UDINT;
     {attribute 'hide'}
+    // Referencing acceleration written to object 0x609A, in drive position units
+    // per second squared (fHomeAcc EGU/s^2 divided by the scale factor).
     nHomeAcc              : UDINT;
     {attribute 'hide'}
+    // Following-error window written to object 0x6065, in drive position counts
+    // (axis fCtrlPosDiffMax EGU divided by the scale factor).
     nScaledFErrWin        : DINT;
     {attribute 'hide'}
+    // Reference offset written to object 0x607C, in drive position counts
+    // (stMotionStage.fHomePosition EGU divided by the scale factor).
     nHomeOffset           : DINT;
     {attribute 'hide'}
+    // Homing method code written to object 0x6098, copied from eHomeMode
+    // (E_MCS2HomeMethod enum; unitless).
     nHomeMethod           : SINT;
     {attribute 'hide'}
+    // Lower bound for the EGU-per-count scale factor, used as a divide-by-zero
+    // guard in every EGU <-> drive count conversion (default 1e-6 EGU/count).
     fScalingFactor		  : LREAL := 0.000001;
     {attribute 'hide'}
+    // Referencing acceleration in engineering units per second squared
+    // (EGU/s^2), converted to drive counts/s^2 by the parameter writers.
     fHomeAcc			  : LREAL := 0.8;
     // ====== Channel-specific object indices ======
-    nSubIndex                : BYTE := 0;        // Main subindex (which channel)
+    nSubIndex                : BYTE := 0;        // Channel selection: CoE subindex (unitless)
     {attribute 'hide'}
+    // CoE object index of the following-error window (0x6065) for this channel; base index + (module-1)*0x800, set by FB_MotionStageMCS2. Unitless.
     nChanFErrWinIdx          : WORD;
     {attribute 'hide'}
+    // CoE object index of the motor load (0x200D) for this channel; base index + (module-1)*0x800, set by FB_MotionStageMCS2. Unitless.
     nChanMotorLoadIdx        : WORD;
     {attribute 'hide'}
+    // CoE object index of the error code (0x603F) for this channel; base index + (module-1)*0x800, set by FB_MotionStageMCS2. Unitless.
     nChanErrorCodeIdx        : WORD;
     {attribute 'hide'}
+    // CoE object index of the open-loop step count (0x2022) for this channel; base index + (module-1)*0x800, set by FB_MotionStageMCS2. Unitless.
     nChanStepIdx             : WORD;
     {attribute 'hide'}
+    // CoE object index of the open-loop step frequency (0x2024) for this channel; base index + (module-1)*0x800, set by FB_MotionStageMCS2. Unitless.
     nChanStepFreqIdx         : WORD;
     {attribute 'hide'}
+    // CoE object index of the open-loop step amplitude (0x2023) for this channel; base index + (module-1)*0x800, set by FB_MotionStageMCS2. Unitless.
     nChanStepAmpIdx          : WORD;
     {attribute 'hide'}
+    // CoE object index of the soft limits (0x200E) for this channel; base index + (module-1)*0x800, set by FB_MotionStageMCS2. Unitless.
     nChanSoftLimitIdx        : WORD;
     {attribute 'hide'}
+    // CoE object index of the home offset (0x607C) for this channel; base index + (module-1)*0x800, set by FB_MotionStageMCS2. Unitless.
     nChanHomeOffsIdx         : WORD;
     {attribute 'hide'}
+    // CoE object index of the homing method (0x6098) for this channel; base index + (module-1)*0x800, set by FB_MotionStageMCS2. Unitless.
     nChanHomeMethodIdx       : WORD;
     {attribute 'hide'}
+    // CoE object index of the referencing speeds (0x6099) for this channel; base index + (module-1)*0x800, set by FB_MotionStageMCS2. Unitless.
     nChanHomeVeloIdx         : WORD;
     {attribute 'hide'}
+    // CoE object index of the referencing acceleration (0x609A) for this channel; base index + (module-1)*0x800, set by FB_MotionStageMCS2. Unitless.
     nChanhomeAccIdx          : WORD;
     {attribute 'hide'}
+    // CoE object index of the maximum closed-loop frequency (0x2001) for this channel; base index + (module-1)*0x800, set by FB_MotionStageMCS2. Unitless.
     nCHanMaxCloseLoopFreqIdx : WORD;
     {attribute 'hide'}
+    // CoE object index of the positioner type (0x2000) for this channel; base index + (module-1)*0x800, set by FB_MotionStageMCS2. Unitless.
     nChanPositionerTypeIdx   : WORD;
     {attribute 'hide'}
+    // CoE object index of the calibration options (0x2004) for this channel; base index + (module-1)*0x800, set by FB_MotionStageMCS2. Unitless.
     nChanCalibrationOptIdx   : WORD;
     {attribute 'hide'}
+    // CoE object index of the sensor power mode (0x2007) for this channel; base index + (module-1)*0x800, set by FB_MotionStageMCS2. Unitless.
     nChanSensorPowerModeIdx  : WORD;
     {attribute 'hide'}
+    // CoE object index of the referencing options (0x200B) for this channel; base index + (module-1)*0x800, set by FB_MotionStageMCS2. Unitless.
     nChanReferencingOptIdx   : WORD;
     {attribute 'hide'}
+    // CoE object index of the reference type (0x200A) for this channel; base index + (module-1)*0x800, set by FB_MotionStageMCS2. Unitless.
     nChanReferenceTypeIdx    : WORD;
     {attribute 'hide'}
+    // CoE object index of the safe direction (0x200C) for this channel; base index + (module-1)*0x800, set by FB_MotionStageMCS2. Unitless.
     nChanSafeDirIdx          : WORD;
     {attribute 'hide'}
+    // CoE object index of the channel type (0x200F) for this channel; base index + (module-1)*0x800, set by FB_MotionStageMCS2. Unitless.
     nChannelTypeIdx          : WORD;
     {attribute 'hide'}
+    // CoE object index of the channel state (0x2025) for this channel; base index + (module-1)*0x800, set by FB_MotionStageMCS2. Unitless.
     nChanStateIdx            : WORD;
     {attribute 'hide'}
+    // CoE object index of the logical scale offset (0x2008) for this channel; base index + (module-1)*0x800, set by FB_MotionStageMCS2. Unitless.
     nChanLogicalScaleOfsIdx  : WORD;
     {attribute 'hide'}
+    // CoE object index of the logical scale inversion (0x2009) for this channel; base index + (module-1)*0x800, set by FB_MotionStageMCS2. Unitless.
     nChanLogicalScaleInvIdx  : WORD;
     {attribute 'hide'}
+    // CoE object index of the channel temperature (0x2026) for this channel; base index + (module-1)*0x800, set by FB_MotionStageMCS2. Unitless.
     nChanChannelTempIdx      : WORD;
     {attribute 'hide'}
+    // CoE object index of the movement type (0x2003) for this channel; base index + (module-1)*0x800, set by FB_MotionStageMCS2. Unitless.
     nChanMovementTypeIdx     : WORD;
     {attribute 'hide'}
+    // CoE object index of the base unit (0x2005) for this channel; base index + (module-1)*0x800, set by FB_MotionStageMCS2. Unitless.
     nChanBaseUnitIdx         : WORD;
     {attribute 'hide'}
+    // CoE object index of the base resolution (0x2006) for this channel; base index + (module-1)*0x800, set by FB_MotionStageMCS2. Unitless.
     nChanBaseResolutionIdx   : WORD;
     {attribute 'hide'}
+    // CoE object index of the distance-code inversion (0x2029) for this channel; base index + (module-1)*0x800, set by FB_MotionStageMCS2. Unitless.
     nChanDistCodeInvIdx      : WORD;
     {attribute 'hide'}
+    // CoE object index of the positioner control options (0x2027) for this channel; base index + (module-1)*0x800, set by FB_MotionStageMCS2. Unitless.
     nChanPositionerCtrlOptIdx: WORD;
     {attribute 'hide'}
+    // CoE object index of the actuator mode (0x2028) for this channel; base index + (module-1)*0x800, set by FB_MotionStageMCS2. Unitless.
     nChanActuatorModeIdx     : WORD;
     {attribute 'hide'}
+    // CoE object index of the motor load protection threshold (0x202B) for this channel; base index + (module-1)*0x800, set by FB_MotionStageMCS2. Unitless.
     nChanMotorLoadProtIdx    : WORD;
     {attribute 'hide'}
+    // CoE object index of the diagnostic closed-loop frequency (0x202A) for this channel; base index + (module-1)*0x800, set by FB_MotionStageMCS2. Unitless.
     nChanDiagClfIdx          : WORD;
+    // Last commanded position in EGU, copied from stMotionStage.fPosition and
+    // used by the step-mode direction and limit bookkeeping.
     fPosition : LREAL;
+    // TRUE once the first channel parameter read completed; gates the exposed-
+    // parameter publishing, persistence and restore in FB_MotionStageMCS2.
+    // Unitless flag.
     bStageReady : BOOL;
-    // Temporary workaround: Avoid declaring mc_power externally from FB_MotionStage
+    // Temporary workaround: Avoid declaring mc_power externally from FB_MotionStage.
+    // When TRUE the DS402 direction enables follow stMotionStage.bAllForwardEnable
+    // and bAllBackwardEnable directly. Unitless flag.
     bOverrideDirEnable : BOOL := TRUE;
+    // TRUE enables the fieldbus parameter writes and hardware operations of this
+    // stage; FALSE keeps the block logic-only (no drive). Unitless flag.
     bEnableHardwareOps : BOOL := TRUE;
+    // Polling period of the channel-state read queue, as TIME (T#5S default).
     nReadTime : TIME := T#5S;
 END_STRUCT
 END_TYPE
