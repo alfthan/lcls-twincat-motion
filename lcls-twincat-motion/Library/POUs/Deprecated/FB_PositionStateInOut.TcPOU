@@ -6,6 +6,10 @@ FUNCTION_BLOCK FB_PositionStateInOut EXTENDS FB_PositionStateBase
 (*
     Example usage of FB_PositionStateBase for a simple IN/OUT axis. See NOTE: comments.
     Also usable as a drop-in for these cases (no need to roll your own in/out)
+
+    The raw EPICS-set enum is sanitized before it can become a motion command: an out-of-range
+    write is rejected instead of being passed to setState, and bSetValid reports whether the
+    value in the SET pv is usable.
 *)
 VAR_INPUT
     // The enum position to move to
@@ -27,9 +31,21 @@ VAR_OUTPUT
         io: i
     '}
     enumGet: ENUM_EpicsInOut_INT; // NOTE: Please copy this pragma exactly on your enumGet
+
+    // TRUE if the value in the SET pv is a valid state request (FALSE while an out-of-range
+    // write is latched in the pv and has been rejected)
+    {attribute 'pytmc' := '
+        pv: SET:VALID
+        io: i
+        field: ZNAM False
+        field: ONAM True
+    '}
+    bSetValid: BOOL;
 END_VAR
 VAR
     bInOutInit: BOOL;
+    // Last enumSet value that passed the range check, held for diagnostics while bSetValid is FALSE
+    enumSetTrusted: ENUM_EpicsInOut_INT;
 END_VAR]]></Declaration>
     <Implementation>
       <ST><![CDATA[IF NOT bInOutInit THEN
@@ -39,10 +55,25 @@ END_VAR]]></Declaration>
     stOut.sName := 'OUT';
     stIn.sName := 'IN';
 END_IF
-setState := enumSet;
+
+// Sanitize the raw EPICS-set enum before it can become a motion command.
+// Anything outside UNKNOWN..IN is rejected: it never reaches setState, so a bad write can
+// never be consumed as a move request. While rejected, enumSetTrusted keeps the last trusted
+// value and bSetValid flags the bad write until the value in the pv is valid again.
+bSetValid := (enumSet >= ENUM_EpicsInOut_INT.UNKNOWN) AND (enumSet <= ENUM_EpicsInOut_INT.IN);
+IF bSetValid THEN
+    enumSetTrusted := enumSet;
+    setState := enumSetTrusted;
+END_IF
+// While bSetValid is FALSE setState is deliberately left untouched: an invalid write neither
+// starts a move nor interrupts the move that is already in progress.
 Exec();
 enumGet := getState;
-enumSet := setState;]]></ST>
+// Echo the consumed request back to the pv. While the write is invalid the bad value is left
+// in place so that bSetValid stays FALSE and visible instead of being scrubbed away.
+IF bSetValid THEN
+    enumSet := setState;
+END_IF]]></ST>
     </Implementation>
   </POU>
 </TcPlcObject>

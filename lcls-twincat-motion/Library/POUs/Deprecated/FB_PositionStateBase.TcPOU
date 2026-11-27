@@ -97,10 +97,15 @@ END_VAR]]></Declaration>
     Example:
 
     <something to fill arrStates>
+    <sanitize enumSet: reject out-of-range writes before they can become a move request>
     setState := enumSet;
     Exec();
     enumGet := getState;
     enumSet := setState;
+
+    Exec bounds-checks setState before using it as an arrStates index, but a subclass must
+    still sanitize the raw external enum it assigns to setState: an out-of-range EPICS write
+    is not a motion request. See FB_PositionStateInOut for an example.
 *)]]></ST>
     </Implementation>
     <Action Name="Exec" Id="{8b37ff0c-46c4-4cbd-b482-f5a9774a00d1}">
@@ -170,11 +175,12 @@ ELSIF bNewGoal THEN
     END_IF
 END_IF
 
-// Pick the correct goal structure or Unknown
-IF goalState = 0 THEN
-    stGoal := stUnknown;
-ELSE
+// Pick the correct goal structure or Unknown.
+// The index is bounds-checked so an out-of-range set request can never read past arrStates.
+IF (goalState >= 1) AND (goalState <= GeneralConstants.MAX_STATES) THEN
     stGoal := arrStates[goalState];
+ELSE
+    stGoal := stUnknown;
 END_IF
 
 // Do the move

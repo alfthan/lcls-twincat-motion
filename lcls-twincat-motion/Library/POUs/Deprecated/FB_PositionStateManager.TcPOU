@@ -149,11 +149,12 @@ ELSIF bNewGoal THEN
     bNewGoal := FALSE;
 END_IF
 
-// Pick the correct goal structure or Unknown
-IF goalState = 0 THEN
-    stGoal := stUnknown;
-ELSE
+// Pick the correct goal structure or Unknown.
+// The index is bounds-checked so an out-of-range set request can never read past arrStates.
+IF (goalState >= 1) AND (goalState <= 15) THEN
     stGoal := arrStates[goalState];
+ELSE
+    stGoal := stUnknown;
 END_IF
 
 // Do the move
