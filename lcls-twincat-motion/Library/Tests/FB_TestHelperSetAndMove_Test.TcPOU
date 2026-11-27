@@ -14,22 +14,55 @@ VAR
     rtSetDone: R_TRIG;
     rtMotionStart: R_TRIG;
     rtMoveDone: R_TRIG;
+    // Only the test whose ID matches nTestCounter may drive fbTestMove, so that the tests in this
+    // suite cannot send conflicting requests to the same stage.
+    nTestCounter: UINT;
+    bOneTestDone: BOOL;
+    // Bounds any test in this suite that stalls so that the suite itself cannot hang
+    tonTestTimeout: TON;
 END_VAR
 ]]></Declaration>
     <Implementation>
       <ST><![CDATA[
 fbMotionStage(stMotionStage:=stMotionstage);
-BasicMotion();
+
+BasicMotion(0);
+TimeoutAbortsRequest(1);
+
+IF bOneTestDone THEN
+    bOneTestDone := FALSE;
+    nTestCounter := nTestCounter + 1;
+    // Drop the request so that the next test starts from a fresh rising edge
+    fbTestMove(
+        stMotionStage:=stMotionStage,
+        bExecute:=FALSE,
+    );
+    stMotionStage.bReset := TRUE;
+    fbMotionStage(stMotionStage:=stMotionStage);
+    // Reset the stall guard for the next test
+    tonTestTimeout(IN:=FALSE);
+END_IF
+
+// Use this timer to time out any test that stalls
+tonTestTimeout(
+    IN:=TRUE,
+    PT:=T#10s,
+);
 ]]></ST>
     </Implementation>
     <Method Name="BasicMotion" Id="{18b58f91-fb57-42d9-8ad5-49bcaf7c02ef}">
       <Declaration><![CDATA[METHOD PRIVATE BasicMotion
 VAR_INPUT
+    // This test's ID, i.e. its position in the nTestCounter sequence
+    nTestID: UINT;
 END_VAR
 ]]></Declaration>
       <Implementation>
         <ST><![CDATA[
 TEST('BasicMotion');
+IF nTestCounter <> nTestID THEN
+    RETURN;
+END_IF
 
 IF NOT fbTestMove.bExecute THEN
     stMotionStage.bError := TRUE;
@@ -94,6 +127,64 @@ IF fbTestMove.bError OR fbTestMove.tElapsed > T#5s OR (fbTestMove.bResetDone AND
         Message:='Timeout in basic motion test',
     );
     TEST_FINISHED();
+    bOneTestDone := TRUE;
+END_IF
+]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="TimeoutAbortsRequest" Id="{2c7f4b5e-9a1d-4e3b-8f60-5b1c9d2e7a44}">
+      <Declaration><![CDATA[METHOD PRIVATE TimeoutAbortsRequest
+VAR_INPUT
+    // This test's ID, i.e. its position in the nTestCounter sequence
+    nTestID: UINT;
+END_VAR
+]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[
+TEST('TimeoutAbortsRequest');
+IF nTestCounter <> nTestID THEN
+    RETURN;
+END_IF
+
+// Ask for a move that cannot finish inside the watchdog: 2 units of travel at 0.001 units/s takes
+// roughly 2000 seconds, far longer than the timeout handed to the helper below.
+fbTestMove(
+    stMotionStage:=stMotionStage,
+    bExecute:=TRUE,
+    fStartPosition:=15.0,
+    fGoalPosition:=17.0,
+    fVelocity:=0.001,
+    bHWEnable:=TRUE,
+    tWaitTimeout:=T#1s,
+);
+
+// Wait for the watchdog to fire (or for this test's own stall guard), then check that the request
+// was failed with an explicit diagnostic and aborted instead of leaving bBusy latched high forever.
+IF fbTestMove.bError OR tonTestTimeout.Q THEN
+    AssertFalse(
+        Condition:=tonTestTimeout.Q,
+        Message:='Timeout in the timeout test: the helper watchdog never fired',
+    );
+    AssertTrue(
+        Condition:=fbTestMove.bError,
+        Message:='The helper did not fail the stalled request',
+    );
+    AssertEquals_UDINT(
+        Expected:=16#7904, // E_LCLSMotionError.TIMEOUT
+        Actual:=fbTestMove.nErrorId,
+        Message:='Wrong error id for the stalled request',
+    );
+    AssertEquals_STRING(
+        Expected:='Timed out waiting for motion to complete',
+        Actual:=fbTestMove.sErrorMessage,
+        Message:='Wrong error message for the stalled request',
+    );
+    AssertFalse(
+        Condition:=fbTestMove.bBusy,
+        Message:='The helper stayed busy after the watchdog expired',
+    );
+    TEST_FINISHED();
+    bOneTestDone := TRUE;
 END_IF
 ]]></ST>
       </Implementation>

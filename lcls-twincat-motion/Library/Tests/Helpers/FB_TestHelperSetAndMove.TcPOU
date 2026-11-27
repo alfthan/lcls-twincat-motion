@@ -9,6 +9,12 @@
 
     The progress of this function block for the purposes of a unit test can be monitored via the outputs.
 
+    Every wait in this sequence (the reset, the set position and the move) is bounded by the
+    tWaitTimeout watchdog, which is evaluated for the active request only. If it expires the request
+    is counted as failed: bError is latched with an explicit timeout diagnostic (nErrorId plus
+    sErrorMessage) and the pending request is aborted, so a stalled axis or a stuck busy bit faults
+    instead of leaving bBusy latched forever.
+
     The motion stage should have its own FB_MotionStage or some stand-in for it running on outside of the FB.
 
     This is, in itself, tested in FB_TestHelperSetAndMove_Test.
@@ -28,6 +34,11 @@ VAR_INPUT
     fVelocity: LREAL;
     // If TRUE, we'll set all the hardware enable signals. Leave this as FALSE if your testing involves any of the hardware enables.
     bHWEnable: BOOL;
+    // Maximum time the reset/set-position/move sequence may take before the request is failed.
+    // The watchdog restarts on each bExecute rising edge and runs only while the request is active.
+    // Increase it for stages that legitimately take a long time to travel, and lower it in tests so
+    // that a stalled axis faults instead of hanging the test suite.
+    tWaitTimeout: TIME := T#1h;
 END_VAR
 VAR_OUTPUT
     // Goes to TRUE once the motor has no errors and is deactivated.
@@ -40,8 +51,12 @@ VAR_OUTPUT
     bMoveDone: BOOL;
     // If bBusy is FALSE, the function block is ready for a new request. Goes to TRUE after bExecute rises and back to FALSE after bMoveDone or bError rises. Also goes to FALSE after the motor stops following bExecute being dropped to FALSE.
     bBusy: BOOL;
-    // Goes to TRUE in case of an error from FB_MotionRequest
+    // Goes to TRUE in case of an error from FB_MotionRequest, from MC_SetPosition, or from an expired watchdog. Latched until the next bExecute rising edge.
     bError: BOOL;
+    // Error code of the latched error: E_LCLSMotionError.TIMEOUT if the watchdog expired, otherwise the error id reported by FB_MotionRequest or MC_SetPosition
+    nErrorId: UDINT;
+    // Human-readable description of nErrorId, i.e. the explicit fault message
+    sErrorMessage: STRING;
     // Counts up from bExecute's rising trigger. Can be used to implement a timeout.
     tElapsed: TIME;
     // Current motor position in case you're looking for it
@@ -52,21 +67,19 @@ END_VAR
 VAR
     fbMoveRequest: FB_MotionRequest;
     mcSetPos: MC_SetPosition;
+    // Watchdog on the whole reset/set-position/move request, evaluated for the active phase only
     tonTimeout: TON;
     rtExec: R_TRIG;
     ftExec: F_TRIG;
     bExecQueued: BOOL;
+    // TRUE from the cycle the watchdog expired until the next bExecute rising edge
+    bTimeoutLatched: BOOL;
+    // Error id of the latched error, published on nErrorId
     nLatchError: UDINT;
 END_VAR
 ]]></Declaration>
     <Implementation>
-      <ST><![CDATA[
-tonTimeout(
-    IN:=bExecute,
-    PT:=T#1h,
-    ET=>tElapsed,
-);
-rtExec(CLK:=bExecute);
+      <ST><![CDATA[rtExec(CLK:=bExecute);
 ftExec(CLK:=bExecute);
 
 // Set the outputs to known values on exec
@@ -76,10 +89,39 @@ bMotionStarted R= rtExec.Q;
 bMoveDone R= rtExec.Q;
 bBusy S= rtExec.Q;
 bError R= rtExec.Q;
+bTimeoutLatched R= rtExec.Q;
+IF rtExec.Q THEN
+    // New request: forget the diagnostics of the previous one
+    nLatchError := 0;
+END_IF
 
 bExecQueued S= rtExec.Q;
 bExecQueued R= ftExec.Q;
 bStoppingMotor S= ftExec.Q;
+
+// Bound the wait for the motion sequence to complete with a watchdog: tElapsed counts up from the
+// bExecute rising edge and tonTimeout.Q is evaluated for the active phase, so the watchdog covers
+// both the reset/set-position phase and the move-completion wait (bMoveDone) and cannot trip on a
+// request that has already finished while the caller still holds bExecute.
+tonTimeout(
+    IN:=bExecute,
+    PT:=tWaitTimeout,
+    ET=>tElapsed,
+);
+
+// A stalled axis must fault instead of blocking forever: on watchdog expiry we count the request
+// as failed, latch an explicit timeout diagnostic and abort the pending request.
+// Only an active request can expire: bBusy drops when the sequence completes or is aborted.
+IF tonTimeout.Q AND bBusy THEN
+    bTimeoutLatched := TRUE;
+END_IF
+IF bTimeoutLatched THEN
+    bError S= TRUE;
+    nLatchError := E_LCLSMotionError.TIMEOUT;
+    // Abort the pending request: forget the queued exec and stop the stage from moving
+    bExecQueued := FALSE;
+    stMotionStage.bExecute := FALSE;
+END_IF
 
 // Set the hardware enables if asked
 IF bHWEnable THEN
@@ -143,13 +185,24 @@ mcSetPos(
     Execute:=bResetDone AND bExecute AND NOT bSetDone AND NOT bError,
     Position:=fStartPosition,
 );
-IF mcSetPos.Done OR mcSetPos.Error THEN
-    nLatchError := mcSetPos.ErrorID;
-END_IF
 bSetDone S= mcSetPos.Done AND NOT mcSetPos.Error AND stMotionStage.stAxisStatus.fActPosition = fStartPosition;
 
-// Any sub-error is an error here
-bError := fbMoveRequest.bError OR mcSetPos.Error;
+// Latch the diagnostic of whatever failed most recently. The watchdog takes priority so that its
+// timeout message is not overwritten by the sub-errors the abort causes.
+IF bTimeoutLatched THEN
+    nLatchError := E_LCLSMotionError.TIMEOUT;
+ELSIF fbMoveRequest.bError THEN
+    nLatchError := fbMoveRequest.nErrorId;
+ELSIF mcSetPos.Done OR mcSetPos.Error THEN
+    nLatchError := mcSetPos.ErrorID;
+END_IF
+nErrorId := nLatchError;
+sErrorMessage := F_MotionErrorCodeLookup(nErrorId := nErrorId);
+
+// Any sub-error is an error here, and errors stay latched until the next bExecute rising edge
+IF fbMoveRequest.bError OR mcSetPos.Error THEN
+    bError S= TRUE;
+END_IF
 
 // Reset bBusy when appropriate
 bBusy R= (bMoveDone AND NOT bStoppingMotor) OR bError OR ftExec.Q;
