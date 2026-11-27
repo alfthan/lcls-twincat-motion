@@ -31,6 +31,8 @@ VAR
     bNegGoal: BOOL;
     fbEncoderValue: FB_EncoderValue;
     fbNCParams: FB_MotionStageNCParams;
+    // One-cycle acknowledge pulse for fbNCParams, taken before the reset handling clears stMotionStage.bReset
+    bNCParamsReset: BOOL;
     bNewMoveReq: BOOL;
     bPrepareDisable: BOOL;
     bMoveCmd: BOOL;
@@ -359,6 +361,10 @@ stMotionStage.stAxisStatus.nCommand := 3; // If this is not 3, the IOC stops upd
 // Fill in auxiliary status info
 stMotionStage.fPosDiff := stMotionStage.Axis.NcToPlc.PosDiff;
 
+// A latched NC parameter read fault is acknowledged by the same reset request.
+// This is captured here because the reset handling below clears stMotionStage.bReset.
+bNCParamsReset := stMotionStage.bReset;
+
 // Reset everything when bReset is flagged
 IF stMotionStage.bReset THEN
     stMotionStage.bEnable := FALSE;
@@ -375,7 +381,8 @@ fbEncoderValue(stMotionStage:=stMotionStage);
 fbNCParams(
     stMotionStage:=stMotionStage,
     bEnable:=TRUE,
-    tRefreshDelay:=T#1s);
+    tRefreshDelay:=T#1s,
+    bReset:=bNCParamsReset);
 
 // Save and restore as long as not an absolute encoder
 fbSaveRestore(

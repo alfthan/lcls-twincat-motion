@@ -1,37 +1,79 @@
 ﻿<?xml version="1.0" encoding="utf-8"?>
 <TcPlcObject Version="1.1.0.1">
   <POU Name="FB_MotionStageNCParams" Id="{ffafdde1-c9c9-04ad-2047-9434c7439ed8}" SpecialFunc="None">
-    <Declaration><![CDATA[FUNCTION_BLOCK FB_MotionStageNCParams
-(*
-    Read and refresh axis parameters struct on ST_MotionStage
+    <Declaration><![CDATA[(*
+    FB_MotionStageNCParams
+    Reads the NC axis parameter set into ST_MotionStage and keeps it refreshed.
+
+    Purpose:
+        Copies the axis parameter set out of the NC into
+        stMotionStage.stAxisParameters on a timer, and mirrors the subset of those
+        parameters that is exposed to EPICS into stMotionStage.stAxisParametersExposed.
+
+    Usage:
+        Call once per PLC cycle with the ST_MotionStage it owns. bEnable arms the
+        periodic read, tRefreshDelay sets its cadence, and bReset is the dedicated
+        acknowledge for a latched parameter read fault.
+
+    Objectives:
+        A failed MC_ReadParameterSet is latched: the first failure is retained in
+        nErrorId together with a latched bError, and both are held until bReset is
+        pulsed. Releasing Execute, or a later successful read, does not dismiss the
+        fault, so a caller polling bError cannot miss it and the cause stays readable.
+
+    History:
+        Author/Date unknown - initial version
+        2026-11-27 - latch parameter read faults and retain the ErrorID until acknowledged
 *)
+FUNCTION_BLOCK FB_MotionStageNCParams
 VAR_IN_OUT
+    // Axis whose parameter set is read and refreshed
     stMotionStage: ST_MotionStage;
 END_VAR
 VAR_INPUT
+    // Arms the periodic parameter read
     bEnable: BOOL;
+    // Cadence of the periodic parameter read
     tRefreshDelay: TIME;
+    // Clears a latched parameter read fault
+    bReset: BOOL;
 END_VAR
 VAR_OUTPUT
+    // TRUE while a parameter read fault is latched
     bError: BOOL;
+    // ErrorID of the latched read fault; 0 when no fault is latched
+    nErrorId: UDINT;
 END_VAR
 VAR
     mcReadParams: MC_ReadParameterSet;
     timer: TON;
+    // TRUE while a read is in flight; starts TRUE so the first read happens at startup
     bExecute: BOOL := TRUE;
+    // Retains the ErrorID of the first failed read until it is acknowledged
     nLatchErrId: UDINT;
+    // TRUE while a read failure is latched
+    bErrorLatched: BOOL;
+    // Detects the rising edge of the acknowledge input
+    rtReset: R_TRIG;
 END_VAR
 ]]></Declaration>
     <Implementation>
-      <ST><![CDATA[timer(
+      <ST><![CDATA[// Acknowledge a latched read failure before looking for a new one, so an
+// acknowledge that coincides with a failure cannot hide it.
+rtReset(CLK:=bReset);
+IF rtReset.Q THEN
+    bErrorLatched := FALSE;
+    nLatchErrId := 0;
+END_IF
+
+timer(
     IN:=bEnable AND NOT bExecute,
     PT:=tRefreshDelay);
 bExecute S= timer.Q;
 mcReadParams(
     Parameter:=stMotionStage.stAxisParameters,
     Axis:=stMotionStage.Axis,
-    Execute:=bEnable AND bExecute,
-    Error=>bError);
+    Execute:=bEnable AND bExecute);
 
 // Copy axis parameters that we want to expose to the EPICS layer.
 stMotionStage.stAxisParametersExposed.bCtrlEnablePosDiffControl     := stMotionStage.stAxisParameters.bCtrlEnablePosDiffControl;
@@ -47,9 +89,16 @@ stMotionStage.stAxisParametersExposed.fVeloMaximum                  := stMotionS
 stMotionStage.stAxisParametersExposed.fEncOffset               		:= stMotionStage.stAxisParameters.fEncOffset;
 stMotionStage.stAxisParametersExposed.fEncScaleFactorInternal       := stMotionStage.stAxisParameters.fEncScaleFactorInternal;
 
-IF mcReadParams.ErrorID <> 0 THEN
-    nLatchErrId := 0;
+// Latch the first failed read until it is acknowledged. MC_ReadParameterSet drops
+// Error as soon as Execute is released, so passing it straight through would only
+// flash the fault for a cycle and lose its ErrorID.
+IF mcReadParams.Error AND NOT bErrorLatched THEN
+    bErrorLatched := TRUE;
+    nLatchErrId := mcReadParams.ErrorID;
 END_IF
+bError := bErrorLatched;
+nErrorId := nLatchErrId;
+
 bExecute R= mcReadParams.Done OR mcReadParams.Error;
 stMotionStage.bAxisParamsInit S= mcReadParams.Done;]]></ST>
     </Implementation>
