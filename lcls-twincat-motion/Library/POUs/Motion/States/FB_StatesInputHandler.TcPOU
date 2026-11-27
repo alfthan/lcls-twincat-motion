@@ -9,6 +9,10 @@
     - Trigger a move to a new state when the enum PV is written to
     - Interrupt an ongoing move with a new one if the enum changes mid-move
     - Stop the move if the enum is set to an invalid value
+    - Latch a fault if the motion does not finish within tMoveTimeout, so that a
+      missing or stuck motion is reported instead of waited on forever
+
+    The latched fault is cleared by the reset input, stUserInput.bReset.
 *)
 VAR_IN_OUT
     // The user's inputs from EPICS. This is an IN_OUT variable because we will write values back to this to help us detect when the same value is re-caput
@@ -21,6 +25,8 @@ VAR_INPUT
     nStartingState: UINT;
     // TRUE if we have a move error, to prevent moves
     bMoveError: BOOL;
+    // How long to wait for the motion to finish, i.e. for bMoveBusy to drop, before latching a fault. Increase this for stages that need a long time to travel between states.
+    tMoveTimeout: TIME := T#60S;
 END_VAR
 VAR_OUTPUT
     // The goal index to input to the motion FB. This will be clamped to the range 0..GeneralConstants.MAX_STATES
@@ -29,18 +35,38 @@ VAR_OUTPUT
     bExecMove: BOOL;
     // The bReset boolean to input to the motion FB
     bResetMove: BOOL;
+    // TRUE if we have latched a fault, e.g. because the motion did not finish within tMoveTimeout. Cleared only by the reset input.
+    bError: BOOL;
+    // The latched fault code, or zero if we have no fault
+    nErrorID: UDINT;
+    // The latched fault message, or an empty string if we have no fault
+    sErrorMessage: STRING;
 END_VAR
 VAR
+    // The current state of the state machine
     nState: UINT;
+    // TRUE once we have initialized our outputs
     bInit: BOOL;
+    // The goal state number from the most recent move request, which we may not have acted on yet
     nQueuedGoal: UINT;
+    // TRUE if we have a move request that we have not acted on yet
     bNewMove: BOOL;
+    // The starting state from the previous cycle, to detect changes that did not come from a move
     nCachedStart: UINT;
+    // Watchdog for the moving part of the state machine (GOING)
+    tonGoTimeout: TON;
+    // Watchdog for the stopping part of the state machine (WAIT_STOP)
+    tonStopTimeout: TON;
 END_VAR
 VAR CONSTANT
+    // Not moving, waiting for a move request
     IDLE: UINT := 0;
+    // Moving, waiting for the motion to finish (for bMoveBusy to drop)
     GOING: UINT := 1;
+    // Interrupting a move, waiting for the motion to stop (for bMoveBusy to drop)
     WAIT_STOP: UINT := 2;
+    // Fault latched: no motion is commanded and new requests are ignored until we are reset
+    ERROR: UINT := 3;
 END_VAR
 ]]></Declaration>
     <Implementation>
@@ -53,13 +79,22 @@ IF bResetMove OR NOT bInit THEN
     nCachedStart := nStartingState;
     bExecMove := FALSE;
     nState := IDLE;
+    nQueuedGoal := 0;
     bNewMove := FALSE;
+    // The reset input acknowledges and clears our latched fault
+    bError := FALSE;
+    nErrorID := 0;
+    sErrorMessage := '';
 END_IF
 
 IF stUserInput.nSetValue <> 0 THEN
     nQueuedGoal := stUserInput.nSetValue;
     bNewMove := TRUE;
 END_IF
+
+// Bound the wait for the motion to finish, so that a missing or stuck motion is reported instead of waited on forever
+tonGoTimeout(IN := nState = GOING, PT := tMoveTimeout);
+tonStopTimeout(IN := nState = WAIT_STOP, PT := tMoveTimeout);
 
 CASE nState OF
     IDLE:
@@ -85,11 +120,34 @@ CASE nState OF
             nState := IDLE;
             nQueuedGoal := 0;
             bExecMove := FALSE;
+        ELSIF tonGoTimeout.Q THEN
+            // The move did not finish in time -> latch a fault and stop commanding the motion
+            nState := ERROR;
+            bExecMove := FALSE;
+            nQueuedGoal := 0;
+            bNewMove := FALSE;
+            bError := TRUE;
+            nErrorID := E_LCLSMotionError.MOVE_TIMEOUT;
+            sErrorMessage := F_MotionErrorCodeLookup(nErrorId := nErrorID);
         END_IF
     WAIT_STOP:
         IF NOT bMoveBusy THEN
             nState := IDLE;
+        ELSIF tonStopTimeout.Q THEN
+            // The interrupted move did not stop in time -> latch a fault
+            nState := ERROR;
+            bExecMove := FALSE;
+            nQueuedGoal := 0;
+            bNewMove := FALSE;
+            bError := TRUE;
+            nErrorID := E_LCLSMotionError.MOVE_TIMEOUT;
+            sErrorMessage := F_MotionErrorCodeLookup(nErrorId := nErrorID);
         END_IF
+    ERROR:
+        // Fault latched: ignore new requests and keep the motion FB stopped until we are reset
+        nQueuedGoal := 0;
+        bNewMove := FALSE;
+        bExecMove := FALSE;
 END_CASE
 
 IF bMoveError THEN

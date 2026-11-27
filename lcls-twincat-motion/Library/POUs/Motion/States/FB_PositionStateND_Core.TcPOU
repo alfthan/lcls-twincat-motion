@@ -69,7 +69,7 @@ fbInput(
     stUserInput:=stEpicsToPlc,
     bMoveBusy:=fbMove.bBusy,
     nStartingState:=fbRead.nPositionIndex,
-    bMoveError:=fbMove.bError,
+    bMoveError:=fbMove.bError OR fbInput.bError,
     nCurrGoal=>nCurrGoal,
     bExecMove=>,
     bResetMove=>,
@@ -97,6 +97,14 @@ fbMove(
     bBusy=>stPlcToEpics.bBusy,
     bDone=>stPlcToEpics.bDone,
 );
+
+// Surface a fault from the input handler, e.g. a move that did not finish within its timeout,
+// on the standard error outputs so that it is reported to the user like any other move failure.
+IF fbInput.bError THEN
+    stPlcToEpics.bError := TRUE;
+    stPlcToEpics.nErrorID := fbInput.nErrorID;
+    stPlcToEpics.sErrorMsg := fbInput.sErrorMessage;
+END_IF
 
 eEnumSet := stEpicsToPlc.nSetValue;
 eEnumGet := stPlcToEpics.nGetValue;

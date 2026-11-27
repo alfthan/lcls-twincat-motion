@@ -1,0 +1,356 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="FB_StatesInputHandler_Test" Id="{5E820BB4-B48B-4D94-85D9-D3255CAE2509}" SpecialFunc="None">
+    <Declaration><![CDATA[FUNCTION_BLOCK FB_StatesInputHandler_Test EXTENDS TcUnit.FB_TestSuite
+(*
+    Unit tests for FB_StatesInputHandler.
+
+    Covers:
+    - The normal move request and finish flow
+    - The latched fault when the move never finishes (GOING timeout)
+    - The latched fault when an interrupted move never stops (WAIT_STOP timeout)
+    - Acknowledging the latched fault with the reset input
+*)
+VAR
+    // The function block under test
+    fbHandler: FB_StatesInputHandler;
+    // The EPICS input struct we hand to the function block under test
+    stUserInput: ST_StateEpicsToPlc;
+    // Simulated bBusy of the motion function block
+    bMoveBusy: BOOL;
+    // Simulated bError of the motion function block
+    bMoveError: BOOL;
+    // Simulated readback state, which seeds nCurrGoal
+    nStartingState: UINT;
+    // Counts up as each multi-cycle test finishes, so that only one test runs at a time
+    nTestCounter: UINT;
+    // TRUE when the currently running multi-cycle test has finished
+    bOneTestDone: BOOL;
+END_VAR
+]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[
+// Each test needs more than one cycle, so they run one after the other
+TestMoveCompletes();
+TestMoveTimeout();
+TestStopTimeout();
+
+IF bOneTestDone THEN
+    bOneTestDone := FALSE;
+    nTestCounter := nTestCounter + 1;
+END_IF
+]]></ST>
+    </Implementation>
+    <Method Name="RunHandler" Id="{D7D2BEB4-07EB-47FE-BB5A-7C732168F501}">
+      <Declaration><![CDATA[METHOD PRIVATE RunHandler
+(*
+    Run the function block under test with the current simulated inputs.
+*)
+VAR_INPUT
+    // TRUE to pulse the reset input
+    bReset: BOOL;
+    // The move timeout to hand to the function block under test
+    tTimeout: TIME;
+END_VAR
+]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[
+stUserInput.bReset := bReset;
+fbHandler(
+    stUserInput:=stUserInput,
+    bMoveBusy:=bMoveBusy,
+    nStartingState:=nStartingState,
+    bMoveError:=bMoveError,
+    tMoveTimeout:=tTimeout,
+);
+]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="TestMoveCompletes" Id="{1EB61DF7-3575-4C3C-A416-AB8B2B1BA6FF}">
+      <Declaration><![CDATA[METHOD PRIVATE TestMoveCompletes
+(*
+    A move that finishes before the timeout must not fault.
+*)
+VAR_INST
+    // The step counter for this test
+    nStep: UINT;
+END_VAR
+]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[
+TEST('TestMoveCompletes');
+IF nTestCounter <> 0 THEN
+    RETURN;
+END_IF
+
+CASE nStep OF
+    0:
+        // Start from a known state
+        bMoveBusy := FALSE;
+        bMoveError := FALSE;
+        nStartingState := 1;
+        stUserInput.nSetValue := 0;
+        RunHandler(bReset:=TRUE, tTimeout:=T#5S);
+        AssertEquals_UINT(
+            Expected:=1,
+            Actual:=fbHandler.nCurrGoal,
+            Message:='Init did not seed the goal from the starting state',
+        );
+        AssertFalse(
+            Condition:=fbHandler.bError,
+            Message:='Started with a latched fault',
+        );
+        AssertFalse(
+            Condition:=fbHandler.bExecMove,
+            Message:='Started a move before any request',
+        );
+        nStep := nStep + 1;
+    1:
+        // Request a state move
+        stUserInput.nSetValue := 3;
+        RunHandler(bReset:=FALSE, tTimeout:=T#5S);
+        AssertEquals_UINT(
+            Expected:=3,
+            Actual:=fbHandler.nCurrGoal,
+            Message:='Did not accept the new goal',
+        );
+        AssertTrue(
+            Condition:=fbHandler.bExecMove,
+            Message:='Did not ask for a move',
+        );
+        // The motion function block starts moving
+        bMoveBusy := TRUE;
+        nStep := nStep + 1;
+    2:
+        RunHandler(bReset:=FALSE, tTimeout:=T#5S);
+        AssertFalse(
+            Condition:=fbHandler.bError,
+            Message:='Faulted before the timeout expired',
+        );
+        nStep := nStep + 1;
+    3:
+        // The motion finishes well before the timeout
+        bMoveBusy := FALSE;
+        RunHandler(bReset:=FALSE, tTimeout:=T#5S);
+        nStep := nStep + 1;
+    4:
+        RunHandler(bReset:=FALSE, tTimeout:=T#5S);
+        AssertFalse(
+            Condition:=fbHandler.bError,
+            Message:='Faulted on a move that finished',
+        );
+        AssertFalse(
+            Condition:=fbHandler.bExecMove,
+            Message:='Kept executing after the move finished',
+        );
+        AssertEquals_UDINT(
+            Expected:=0,
+            Actual:=fbHandler.nErrorID,
+            Message:='Set an error code without an error',
+        );
+        nStep := nStep + 1;
+        bOneTestDone := TRUE;
+        TEST_FINISHED();
+END_CASE
+]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="TestMoveTimeout" Id="{EECFBC79-7384-439F-915A-E0B1AC7ABBDA}">
+      <Declaration><![CDATA[METHOD PRIVATE TestMoveTimeout
+(*
+    A move that never finishes must latch a fault, and that fault must only be
+    cleared by the reset input.
+*)
+VAR_INST
+    // The step counter for this test
+    nStep: UINT;
+    // Keeps the test from hanging when the fault never arrives
+    tonGuard: TON;
+END_VAR
+]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[
+TEST('TestMoveTimeout');
+IF nTestCounter <> 1 THEN
+    RETURN;
+END_IF
+
+CASE nStep OF
+    0:
+        // Start from a known state
+        bMoveBusy := FALSE;
+        bMoveError := FALSE;
+        nStartingState := 1;
+        stUserInput.nSetValue := 0;
+        tonGuard(IN:=FALSE);
+        RunHandler(bReset:=TRUE, tTimeout:=T#100MS);
+        nStep := nStep + 1;
+    1:
+        stUserInput.nSetValue := 2;
+        RunHandler(bReset:=FALSE, tTimeout:=T#100MS);
+        AssertTrue(
+            Condition:=fbHandler.bExecMove,
+            Message:='Did not ask for a move',
+        );
+        // The motion function block starts moving and never finishes
+        bMoveBusy := TRUE;
+        nStep := nStep + 1;
+    2:
+        // Wait for the move watchdog to expire
+        tonGuard(IN:=TRUE, PT:=T#5S);
+        RunHandler(bReset:=FALSE, tTimeout:=T#100MS);
+        IF fbHandler.bError OR tonGuard.Q THEN
+            AssertTrue(
+                Condition:=fbHandler.bError,
+                Message:='Did not fault when the move never finished',
+            );
+            AssertEquals_UDINT(
+                Expected:=E_LCLSMotionError.MOVE_TIMEOUT,
+                Actual:=fbHandler.nErrorID,
+                Message:='Wrong error code for the move timeout',
+            );
+            AssertTrue(
+                Condition:=fbHandler.sErrorMessage <> '',
+                Message:='Did not set an error message',
+            );
+            AssertFalse(
+                Condition:=fbHandler.bExecMove,
+                Message:='Kept commanding the move after the timeout',
+            );
+            tonGuard(IN:=FALSE);
+            nStep := nStep + 1;
+        END_IF
+    3:
+        // New requests must be ignored while the fault is latched
+        stUserInput.nSetValue := 3;
+        RunHandler(bReset:=FALSE, tTimeout:=T#100MS);
+        AssertTrue(
+            Condition:=fbHandler.bError,
+            Message:='The fault did not stay latched',
+        );
+        AssertFalse(
+            Condition:=fbHandler.bExecMove,
+            Message:='Started a new move while faulted',
+        );
+        nStep := nStep + 1;
+    4:
+        // The fault must survive a cycle without the reset input
+        RunHandler(bReset:=FALSE, tTimeout:=T#100MS);
+        AssertTrue(
+            Condition:=fbHandler.bError,
+            Message:='The fault cleared without a reset',
+        );
+        nStep := nStep + 1;
+    5:
+        // The reset input acknowledges the fault
+        RunHandler(bReset:=TRUE, tTimeout:=T#100MS);
+        AssertFalse(
+            Condition:=fbHandler.bError,
+            Message:='The reset input did not clear the fault',
+        );
+        AssertEquals_UDINT(
+            Expected:=0,
+            Actual:=fbHandler.nErrorID,
+            Message:='The reset input did not clear the error code',
+        );
+        nStep := nStep + 1;
+        bOneTestDone := TRUE;
+        TEST_FINISHED();
+END_CASE
+]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="TestStopTimeout" Id="{17064E51-FB3D-4A54-9FD2-62B38E48073E}">
+      <Declaration><![CDATA[METHOD PRIVATE TestStopTimeout
+(*
+    An interrupted move that never stops must latch a fault, just like a move
+    that never finishes.
+*)
+VAR_INST
+    // The step counter for this test
+    nStep: UINT;
+    // Keeps the test from hanging when the fault never arrives
+    tonGuard: TON;
+END_VAR
+]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[
+TEST('TestStopTimeout');
+IF nTestCounter <> 2 THEN
+    RETURN;
+END_IF
+
+CASE nStep OF
+    0:
+        // Start from a known state
+        bMoveBusy := FALSE;
+        bMoveError := FALSE;
+        nStartingState := 1;
+        stUserInput.nSetValue := 0;
+        tonGuard(IN:=FALSE);
+        RunHandler(bReset:=TRUE, tTimeout:=T#100MS);
+        nStep := nStep + 1;
+    1:
+        stUserInput.nSetValue := 2;
+        RunHandler(bReset:=FALSE, tTimeout:=T#100MS);
+        AssertTrue(
+            Condition:=fbHandler.bExecMove,
+            Message:='Did not ask for a move',
+        );
+        bMoveBusy := TRUE;
+        nStep := nStep + 1;
+    2:
+        // One cycle of GOING
+        RunHandler(bReset:=FALSE, tTimeout:=T#100MS);
+        AssertFalse(
+            Condition:=fbHandler.bError,
+            Message:='Faulted before the timeout expired',
+        );
+        nStep := nStep + 1;
+    3:
+        // Interrupting the move with a new request asks for a stop
+        stUserInput.nSetValue := 3;
+        RunHandler(bReset:=FALSE, tTimeout:=T#100MS);
+        AssertFalse(
+            Condition:=fbHandler.bExecMove,
+            Message:='Did not stop the move when a new request arrived',
+        );
+        nStep := nStep + 1;
+    4:
+        // The motion never stops, so the stop watchdog must expire
+        tonGuard(IN:=TRUE, PT:=T#5S);
+        RunHandler(bReset:=FALSE, tTimeout:=T#100MS);
+        IF fbHandler.bError OR tonGuard.Q THEN
+            AssertTrue(
+                Condition:=fbHandler.bError,
+                Message:='Did not fault when the move never stopped',
+            );
+            AssertEquals_UDINT(
+                Expected:=E_LCLSMotionError.MOVE_TIMEOUT,
+                Actual:=fbHandler.nErrorID,
+                Message:='Wrong error code for the stop timeout',
+            );
+            AssertFalse(
+                Condition:=fbHandler.bExecMove,
+                Message:='Kept commanding the move after the timeout',
+            );
+            tonGuard(IN:=FALSE);
+            nStep := nStep + 1;
+        END_IF
+    5:
+        // The motion finally stops and the fault is acknowledged
+        bMoveBusy := FALSE;
+        RunHandler(bReset:=TRUE, tTimeout:=T#100MS);
+        AssertFalse(
+            Condition:=fbHandler.bError,
+            Message:='The reset input did not clear the fault',
+        );
+        nStep := nStep + 1;
+        bOneTestDone := TRUE;
+        TEST_FINISHED();
+END_CASE
+]]></ST>
+      </Implementation>
+    </Method>
+  </POU>
+</TcPlcObject>
