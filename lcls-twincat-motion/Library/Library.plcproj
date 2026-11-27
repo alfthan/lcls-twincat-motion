@@ -155,6 +155,12 @@
     <Compile Include="DUTs\DS402\ST_MCS2ChanParameter.TcDUT">
       <SubType>Code</SubType>
     </Compile>
+    <Compile Include="DUTs\DS402\ST_MCS2AxisInterface.TcDUT">
+      <SubType>Code</SubType>
+    </Compile>
+    <Compile Include="DUTs\DS402\ST_MCS2ReadParamsInterface.TcDUT">
+      <SubType>Code</SubType>
+    </Compile>
     <Compile Include="DUTs\E_EpicsHomeCmd.TcDUT">
       <SubType>Code</SubType>
     </Compile>
@@ -207,6 +213,9 @@
       <SubType>Code</SubType>
     </Compile>
     <Compile Include="DUTs\ST_MotionPneumaticActuator.TcDUT">
+      <SubType>Code</SubType>
+    </Compile>
+    <Compile Include="DUTs\ST_GantryAutoCouplingInterface.TcDUT">
       <SubType>Code</SubType>
     </Compile>
     <Compile Include="DUTs\E_PnuematicActuatorPositionState.TcDUT">

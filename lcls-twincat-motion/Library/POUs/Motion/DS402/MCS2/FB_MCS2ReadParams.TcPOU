@@ -1,11 +1,26 @@
 ﻿<?xml version="1.0" encoding="utf-8"?>
 <TcPlcObject Version="1.1.0.1">
   <POU Name="FB_MCS2ReadParams" Id="{26b1eb2f-7113-4b0e-bfa2-acd56d914490}" SpecialFunc="None">
-    <Declaration><![CDATA[FUNCTION_BLOCK FB_MCS2ReadParams
+    <Declaration><![CDATA[(*
+    MCS2 Read Parameters
+    Re-arms the shared MCS2 channel parameter read trigger once all three
+    channels report bAxisParamsInit, so the three channels are read as one
+    group on a fixed cadence.
+
+    Interface: the three stage interfaces are bound through the single
+    VAR_IN_OUT interface struct ST_MCS2ReadParamsInterface, so a caller wires
+    one reference instead of three.
+
+    History:
+        2026-11-27  scirix agent  Consolidated the three VAR_IN_OUT ST_MotionStage
+                                  references into ST_MCS2ReadParamsInterface
+                                  (audit finding 1092, convention
+                                  conv_83a907114111).
+*)
+FUNCTION_BLOCK FB_MCS2ReadParams
 VAR_IN_OUT
-    stMCS2Chan1Stage : ST_MotionStage;
-    stMCS2Chan2Stage : ST_MotionStage;
-    stMCS2Chan3Stage : ST_MotionStage;
+    // The three stage interfaces this block synchronises
+    iq_stReadParams : ST_MCS2ReadParamsInterface;
 END_VAR
 VAR
     fbReadChan1Params : FB_ReadChanParameters;
@@ -18,9 +33,14 @@ VAR
 END_VAR
 ]]></Declaration>
     <Implementation>
-      <ST><![CDATA[rtExecParamsRead(CLK := (stMCS2Chan1Stage.bAxisParamsInit
-                            AND stMCS2Chan2Stage.bAxisParamsInit
-                            AND stMCS2Chan3Stage.bAxisParamsInit
+      <ST><![CDATA[// An unbound interface struct cannot be dereferenced: fault out quietly.
+IF NOT __ISVALIDREF(iq_stReadParams) THEN
+    RETURN;
+END_IF
+
+rtExecParamsRead(CLK := (iq_stReadParams.stChan1Stage.bAxisParamsInit
+                            AND iq_stReadParams.stChan2Stage.bAxisParamsInit
+                            AND iq_stReadParams.stChan3Stage.bAxisParamsInit
                 ));
 
 IF rtExecParamsRead.Q THEN
@@ -37,8 +57,7 @@ IF tonSDOReadTrigger.Q THEN
     bChanReadTrigger := TRUE;
 END_IF
 
-tonSDOReadTrigger(PT := nReadTime);
-]]></ST>
+tonSDOReadTrigger(PT := nReadTime);]]></ST>
     </Implementation>
   </POU>
 </TcPlcObject>

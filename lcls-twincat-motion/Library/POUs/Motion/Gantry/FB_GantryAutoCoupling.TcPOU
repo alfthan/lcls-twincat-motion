@@ -1,20 +1,31 @@
 ﻿<?xml version="1.0" encoding="utf-8"?>
 <TcPlcObject Version="1.1.0.1">
   <POU Name="FB_GantryAutoCoupling" Id="{532dfcaf-6187-4140-aaad-e20a9bbe6b43}" SpecialFunc="None">
-    <Declaration><![CDATA[FUNCTION_BLOCK FB_GantryAutoCoupling
+    <Declaration><![CDATA[(*
+    Gantry Auto Coupling
+    Couples (MC_GearIn) a master/slave gantry pair automatically at initialisation
+    and decouples (MC_GearOut) on request, while running the gantry difference
+    virtual limit switch that disables the axis direction that would increase the
+    gantry skew.
+
+    Interface: both axes, both absolute encoders, the couple/decouple commands and
+    the coupling status live in the single VAR_IN_OUT interface struct
+    ST_GantryAutoCouplingInterface, so a caller binds one reference.
+
+    History:
+        2026-11-27  scirix agent  Consolidated the six separate VAR_IN_OUT
+                                  terminals and the VAR_OUTPUT status bit into
+                                  ST_GantryAutoCouplingInterface (audit finding
+                                  1106, convention conv_83a907114111).
+*)
+FUNCTION_BLOCK FB_GantryAutoCoupling
 VAR_INPUT
+    // Gantry difference tolerance in encoder counts
     nGantryTol : LINT;
 END_VAR
-VAR_OUTPUT
-    bGantryAlreadyCoupled : BOOL;
-END_VAR
 VAR_IN_OUT
-    Master : ST_MotionStage;
-    MasterEnc : ST_RenishawAbsEnc;
-    Slave : ST_MotionStage;
-    SlaveEnc : ST_RenishawAbsEnc;
-    bExecuteCouple : BOOL;
-    bExecuteDecouple : BOOL;
+    // Single gantry interface: both axes, both encoders, commands and status
+    iq_stGantry : ST_GantryAutoCouplingInterface;
 END_VAR
 VAR
     gantry_diff_limit : FB_GantryDiffVirtualLimitSwitch;
@@ -25,45 +36,58 @@ VAR
 END_VAR
 ]]></Declaration>
     <Implementation>
-      <ST><![CDATA[// Designate Master and SLave Axes
-Master.bGantryAxis := TRUE;
-Slave.bGantryAxis := TRUE;
+      <ST><![CDATA[// An unbound interface struct cannot be dereferenced: fault out quietly.
+IF NOT __ISVALIDREF(iq_stGantry) THEN
+    RETURN;
+END_IF
 
-Master.nGantryTol := nGantryTol;
-Slave.nGantryTol := Master.nGantryTol;
+// Designate Master and Slave Axes
+iq_stGantry.stMaster.bGantryAxis := TRUE;
+iq_stGantry.stSlave.bGantryAxis := TRUE;
+
+iq_stGantry.stMaster.nGantryTol := nGantryTol;
+iq_stGantry.stSlave.nGantryTol := iq_stGantry.stMaster.nGantryTol;
 
 // Activate Gantry Virtual Limit Switch
-gantry_diff_limit(Penc:=MasterEnc, SEnc:=SlaveEnc, GantDiffTol:=Master.nGantryTol,
-                  PLimFwd=>Master.bGantryForwardEnable, PLimBwd=>Master.bGantryBackwardEnable,
-                  SLimFwd=>Slave.bGantryForwardEnable, SLimBwd=>Slave.bGantryBackwardEnable);
+gantry_diff_limit(Penc:=iq_stGantry.stMasterEnc, SEnc:=iq_stGantry.stSlaveEnc,
+                  GantDiffTol:=iq_stGantry.stMaster.nGantryTol,
+                  PLimFwd=>iq_stGantry.stMaster.bGantryForwardEnable,
+                  PLimBwd=>iq_stGantry.stMaster.bGantryBackwardEnable,
+                  SLimFwd=>iq_stGantry.stSlave.bGantryForwardEnable,
+                  SLimBwd=>iq_stGantry.stSlave.bGantryBackwardEnable);
 
 // Coupling Status Bit
-bGantryAlreadyCoupled := Master.Axis.NcToPlc.CoupleState=1 AND Slave.Axis.NcToPlc.CoupleState=3;
+iq_stGantry.bGantryAlreadyCoupled := iq_stGantry.stMaster.Axis.NcToPlc.CoupleState=1
+                                     AND iq_stGantry.stSlave.Axis.NcToPlc.CoupleState=3;
 
-fbSetEnables(stMotionStage:=Master);
-fbSetEnables(stMotionStage:=Slave);
+fbSetEnables(stMotionStage:=iq_stGantry.stMaster);
+fbSetEnables(stMotionStage:=iq_stGantry.stSlave);
 
-IF bGantryAlreadyCoupled THEN
-    Master.bGantryForwardEnable := Master.bGantryForwardEnable AND Slave.bAllForwardEnable;
-    Slave.bGantryForwardEnable := Master.bAllForwardEnable AND Slave.bGantryForwardEnable;
+IF iq_stGantry.bGantryAlreadyCoupled THEN
+    iq_stGantry.stMaster.bGantryForwardEnable := iq_stGantry.stMaster.bGantryForwardEnable
+                                                 AND iq_stGantry.stSlave.bAllForwardEnable;
+    iq_stGantry.stSlave.bGantryForwardEnable := iq_stGantry.stMaster.bAllForwardEnable
+                                                AND iq_stGantry.stSlave.bGantryForwardEnable;
 
-    Master.bGantryBackwardEnable := Master.bGantryBackwardEnable AND Slave.bAllBackwardEnable;
-    Slave.bGantryBackwardEnable := Master.bAllBackwardEnable AND Slave.bGantryBackwardEnable;
+    iq_stGantry.stMaster.bGantryBackwardEnable := iq_stGantry.stMaster.bGantryBackwardEnable
+                                                  AND iq_stGantry.stSlave.bAllBackwardEnable;
+    iq_stGantry.stSlave.bGantryBackwardEnable := iq_stGantry.stMaster.bAllBackwardEnable
+                                                 AND iq_stGantry.stSlave.bGantryBackwardEnable;
 END_IF
 
 
 // Coupling states
 // Auto-coupling at init and auto-reset of coupling boolean
-bExecuteCouple S= NOT bInitComplete;
+iq_stGantry.bExecuteCouple S= NOT bInitComplete;
 
-bExecuteCouple R= couple.Busy OR bGantryAlreadyCoupled;
-couple(Master:=Master.Axis, Slave:=Slave.Axis, Execute:=bExecuteCouple);
+iq_stGantry.bExecuteCouple R= couple.Busy OR iq_stGantry.bGantryAlreadyCoupled;
+couple(Master:=iq_stGantry.stMaster.Axis, Slave:=iq_stGantry.stSlave.Axis, Execute:=iq_stGantry.bExecuteCouple);
 
-bInitComplete S= bGantryAlreadyCoupled;
+bInitComplete S= iq_stGantry.bGantryAlreadyCoupled;
 
 // Decoupling with auto-reset of coupling boolean
-bExecuteDecouple R= decouple.Busy OR NOT bGantryAlreadyCoupled;
-decouple(Slave:=Slave.Axis, Execute:=bExecuteDecouple);]]></ST>
+iq_stGantry.bExecuteDecouple R= decouple.Busy OR NOT iq_stGantry.bGantryAlreadyCoupled;
+decouple(Slave:=iq_stGantry.stSlave.Axis, Execute:=iq_stGantry.bExecuteDecouple);]]></ST>
     </Implementation>
   </POU>
 </TcPlcObject>

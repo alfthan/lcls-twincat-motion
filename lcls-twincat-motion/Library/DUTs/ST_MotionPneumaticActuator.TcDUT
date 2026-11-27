@@ -71,6 +71,32 @@ STRUCT
     '}
     bRetractOK    :    BOOL;
 
+    // Arbiter permit from the PMPS arbiter bit: TRUE when the arbiter allows motion
+    {attribute 'pytmc' := '
+     pv: bPMPS_OK
+     io: i
+     field: ZNAM FALSE
+     field: ONAM TRUE
+     field: DESC TRUE if the PMPS arbiter permits motion
+    '}
+    bPMPS_OK : BOOL;
+    // Configuration: TRUE when the actuator is single acting (one control output)
+    bSingleCntrl : BOOL;
+    // Configuration: TRUE when the control signal must retain its value (single acting)
+    bCntrlHold : BOOL;
+    // Configuration: TRUE to bypass the perimeter interlocks
+    bOverrideInterlock : BOOL;
+    // Fast fault: TRUE requests a fast fault reset (EPICS FFO_Reset)
+    {attribute 'pytmc' := '
+     pv: FFO_Reset
+    '}
+    bFFReset : BOOL;
+    // Fast fault: TRUE enables the fast fault auto reset (EPICS FFO_AutoReset)
+    {attribute 'pytmc' := '
+     pv: FFO_AutoReset
+    '}
+    bFFAutoReset : BOOL;
+
     (* Commands *)
     // Used from Epics to comand the actuator to  move
     {attribute 'pytmc' := '
@@ -129,6 +155,15 @@ STRUCT
      io: i
      field: DESC Error code if nonzero
     '}
+    // TRUE when both limit switches report a seated position, i.e. not moving
+    {attribute 'pytmc' := '
+     pv: MPS_OK
+     io: i
+     field: ZNAM FALSE
+     field: ONAM TRUE
+     field: DESC TRUE if MPS signal is OK
+    '}
+    bMPS_OK : BOOL;
     nErrorId: UDINT;
     // Message to identify the error state
     {attribute 'pytmc' := '

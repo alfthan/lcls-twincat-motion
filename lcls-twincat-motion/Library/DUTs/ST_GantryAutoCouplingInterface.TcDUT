@@ -1,0 +1,44 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <DUT Name="ST_GantryAutoCouplingInterface" Id="{934969EA-FA44-4756-9DFA-E4788BA856FD}">
+    <Declaration><![CDATA[(*
+    Single interface struct for FB_GantryAutoCoupling.
+
+    Purpose: carry the complete command and status data of the two gantry axes
+    so that a caller binds exactly one VAR_IN_OUT reference to the block instead
+    of wiring the axes, the encoders and the coupling commands as separate
+    terminals.
+
+    Usage: declare one instance of this struct in a GVL or program (or inside a
+    higher level device struct), link the two ST_MotionStage axes and the two
+    ST_RenishawAbsEnc encoders, then pass the instance to
+    FB_GantryAutoCoupling(iq_stGantry := ...).
+
+    Objectives: keep the gantry interface in one place, keep command ownership
+    with the caller and let the block read and write the shared state.
+
+    History:
+        2026-11-27  scirix agent  Created for audit findings 1106
+                                  (convention conv_83a907114111).
+*)
+TYPE ST_GantryAutoCouplingInterface :
+STRUCT
+    // Primary (upstream) gantry axis, command and status
+    stMaster : ST_MotionStage;
+    // Primary axis absolute encoder, used by the gantry difference limit switch
+    stMasterEnc : ST_RenishawAbsEnc;
+    // Secondary (downstream) gantry axis, command and status
+    stSlave : ST_MotionStage;
+    // Secondary axis absolute encoder, used by the gantry difference limit switch
+    stSlaveEnc : ST_RenishawAbsEnc;
+    // Command: TRUE requests a gear-in (couple) of the two axes
+    bExecuteCouple : BOOL;
+    // Command: TRUE requests a gear-out (decouple) of the two axes
+    bExecuteDecouple : BOOL;
+    // Status: TRUE when both axes report a coupled NC state
+    bGantryAlreadyCoupled : BOOL;
+END_STRUCT
+END_TYPE
+]]></Declaration>
+  </DUT>
+</TcPlcObject>

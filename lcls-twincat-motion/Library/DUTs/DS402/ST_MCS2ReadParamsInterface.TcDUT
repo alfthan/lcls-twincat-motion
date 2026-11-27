@@ -1,0 +1,33 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <DUT Name="ST_MCS2ReadParamsInterface" Id="{BCFA3816-F523-41C5-9349-C15B19D0676F}">
+    <Declaration><![CDATA[(*
+    Single interface struct for FB_MCS2ReadParams.
+
+    Purpose: group the three MCS2 stage interfaces the block synchronises, so a
+    caller binds exactly one VAR_IN_OUT reference instead of three separate
+    ST_MotionStage references.
+
+    Usage: declare one instance in a GVL or program and pass it to
+    FB_MCS2ReadParams(iq_stReadParams := ...).
+
+    Objectives: one stable interface for the multi-channel parameter read
+    synchronisation; command and status ownership stays with the caller.
+
+    History:
+        2026-11-27  scirix agent  Created for audit findings 1092
+                                  (convention conv_83a907114111).
+*)
+TYPE ST_MCS2ReadParamsInterface :
+STRUCT
+    // Channel 1 axis interface
+    stChan1Stage : ST_MotionStage;
+    // Channel 2 axis interface
+    stChan2Stage : ST_MotionStage;
+    // Channel 3 axis interface
+    stChan3Stage : ST_MotionStage;
+END_STRUCT
+END_TYPE
+]]></Declaration>
+  </DUT>
+</TcPlcObject>

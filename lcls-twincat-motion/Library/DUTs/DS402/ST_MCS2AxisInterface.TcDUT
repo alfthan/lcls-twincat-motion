@@ -1,0 +1,33 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <DUT Name="ST_MCS2AxisInterface" Id="{0BEF0B7C-7DC2-48E7-A2D4-AF9BFC2458FF}">
+    <Declaration><![CDATA[(*
+    Single interface struct for FB_MotionStageMCS2.
+
+    Purpose: carry the complete command and status data of one MCS2 axis - the
+    motor record / NC interface and the MCS2 channel configuration - so that a
+    caller binds exactly one VAR_IN_OUT reference instead of two REFERENCE TO
+    variables.
+
+    Usage: declare one instance per axis in a GVL or program, then pass it to
+    FB_MotionStageMCS2(iq_stAxis := ...). The block validates the reference once
+    at entry and exits early when it is unbound.
+
+    Objectives: one stable, validated interface per axis; command and status
+    ownership stays with the caller.
+
+    History:
+        2026-11-27  scirix agent  Created for audit findings 1093
+                                  (convention conv_83a907114111).
+*)
+TYPE ST_MCS2AxisInterface :
+STRUCT
+    // Motor record / NC command and status interface for the axis
+    stMotionStage : ST_MotionStage;
+    // MCS2 channel configuration, commands and drive-reported parameters
+    stChanParams : ST_MCS2ChanParameter;
+END_STRUCT
+END_TYPE
+]]></Declaration>
+  </DUT>
+</TcPlcObject>
