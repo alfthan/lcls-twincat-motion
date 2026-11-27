@@ -3,11 +3,51 @@
   <POU Name="FB_StatePTPMove" Id="{425806ee-2b8b-43fd-93f1-34dff217483a}" SpecialFunc="None">
     <Declaration><![CDATA[{attribute 'obsolete' := 'Use FB_PositionStateMove instead'}
 FUNCTION_BLOCK FB_StatePTPMove
-// Do not use, this is deprecated
+(*
+    DEPRECATED - do not use in new code. Prefer FB_PositionStateMove or the
+    FB_PositionState* family; this block is kept only so existing programs compile.
+
+    Purpose:
+        Legacy single-state point-to-point move helper for one motion stage. On
+        request it commands stMotionStage to the position held in stPositionState,
+        then reports whether the axis has arrived at that state and forwards the
+        stage error state and message to the caller.
+
+    Usage:
+        1. Wire the VAR_IN_OUT stMotionStage to the ST_MotionStage of the axis.
+        2. Wire stPositionState to the ST_PositionState describing the target.
+        3. Wire bMoveOk to the move permit for that state (normally
+           stPositionState.bMoveOk); no move is issued while it is FALSE.
+        4. Pulse bExecute TRUE for each move. The move starts only on the rising
+           edge, while bMoveOk is TRUE and while the axis is neither busy nor in
+           error: the target position, velocity, acceleration and deceleration
+           are copied into stMotionStage and a MOVE_ABSOLUTE command is issued.
+        5. Observe bAtState (within tolerance), bBusy (move in progress), bDone
+           (move finished or idle) and bError/sError (stage fault).
+        Dropping bExecute drops the stage execute and ends the command.
+
+    Objectives:
+        - Move the axis to stPositionState.fPosition at stPositionState.fVelocity.
+        - Never issue a move without the bMoveOk permit or onto a busy/faulted axis.
+        - Report "at state" when the actual position lies strictly inside
+          fPosition +/- fDelta.
+        - Mirror the underlying stage error and error message for the caller.
+
+    Units:
+        All positions, velocities and accelerations are in the engineering units
+        configured for the NC axis (per the axis scaling, e.g. mm or degrees),
+        never in raw encoder counts.
+
+    History:
+        2020-02-13  Z. Lentz     Restored under POUs/Deprecated and kept compiling.
+        2023-07-27  Z. Lentz     Marked obsolete: 'Use FB_PositionStateMove instead'.
+        2026-11-27  L. Numminen  Added this header block and per-declaration comments.
+*)
 VAR_INPUT
     {attribute 'pytmc' := '
         pv:
     '}
+    // Target state: position, velocity, accel/decel and arrival tolerance to move to
     stPositionState: ST_PositionState;
 
     {attribute 'pytmc' := '
@@ -16,11 +56,14 @@ VAR_INPUT
         field: ZNAM False
         field: ONAM True
     '}
+    // Rising edge TRUE requests one move to stPositionState; drop it to end the move
     bExecute: BOOL;
 
+    // Move permit: the move is only issued while TRUE (wire to stPositionState.bMoveOk)
     bMoveOk: BOOL;
 END_VAR
 VAR_IN_OUT
+    // Axis/stage to command; move setpoints and live status/error are exchanged here
     stMotionStage: ST_MotionStage;
 END_VAR
 VAR_OUTPUT
@@ -30,6 +73,7 @@ VAR_OUTPUT
         field: ZNAM False
         field: ONAM True
     '}
+    // TRUE while the actual position is within +/- stPositionState.fDelta of the target
     bAtState: BOOL;
 
     {attribute 'pytmc' := '
@@ -38,6 +82,7 @@ VAR_OUTPUT
         field: ZNAM False
         field: ONAM True
     '}
+    // TRUE when a commanded move has finished, or when no move is active
     bDone: BOOL;
 
     {attribute 'pytmc' := '
@@ -46,6 +91,7 @@ VAR_OUTPUT
         field: ZNAM False
         field: ONAM True
     '}
+    // TRUE while a commanded move is in progress
     bBusy: BOOL;
 
     {attribute 'pytmc' := '
@@ -54,19 +100,26 @@ VAR_OUTPUT
         field: ZNAM False
         field: ONAM True
     '}
+    // TRUE while the underlying stage reports an error (latched by the stage, not here)
     bError: BOOL;
 
     {attribute 'pytmc' := '
         pv: ERRMSG
         io: input
     '}
+    // Stage error message text, only meaningful while bError is TRUE
     sError: STRING;
 END_VAR
 VAR
+    // Rising-edge detector on bExecute: starts a new move
     bExecTrig: R_TRIG;
+    // Falling-edge detector on bExecute: ends the current move
     bExecEnd: F_TRIG;
+    // Actual axis position read back from stMotionStage [axis engineering units]
     fActPosition: LREAL;
+    // Lower arrival bound: stPositionState.fPosition - stPositionState.fDelta [axis eng. units]
     fLowPos: LREAL;
+    // Upper arrival bound: stPositionState.fPosition + stPositionState.fDelta [axis eng. units]
     fHighPos: LREAL;
 END_VAR
 ]]></Declaration>
