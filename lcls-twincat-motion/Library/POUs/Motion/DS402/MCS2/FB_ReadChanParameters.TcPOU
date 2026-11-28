@@ -1,37 +1,100 @@
 ﻿<?xml version="1.0" encoding="utf-8"?>
 <TcPlcObject Version="1.1.0.1">
   <POU Name="FB_ReadChanParameters" Id="{08ee74cb-7e7d-468d-8ff5-637be4dc44de}" SpecialFunc="None">
-    <Declaration><![CDATA[// Two-queue serialized SDO reader for MCS2 channel parameters.
-// Two independent state machines, both serializing onto the same slave but
-// gated against each other so only one SDO request is outstanding at a time.
+    <Declaration><![CDATA[// ============================================================================
+// FB_ReadChanParameters
+// ----------------------------------------------------------------------------
+// Purpose:
+//   Two-queue serialized SDO reader for MCS2 channel parameters.
 //
-//   FAST queue: ChannelState only. Polled continuously at nReadTime. This is
-//     the latency-sensitive path that interlocks depend on.
+// Usage:
+//   Call once per PLC cycle, after stMotionStage, stMCS2ChanParameter and
+//   stDS402Drive are wired. All three are VAR_IN_OUT references and are
+//   validated with __ISVALIDREF on entry; on an invalid reference the block
+//   returns without touching anything. Drive bEnable TRUE to let the queues
+//   run; bEnable FALSE parks every bExecute line and resets the queue timers
+//   without clearing the last read-back values. The first read is gated by
+//   stMotionStage.bAxisParamsInit. This block owns every read of the channel
+//   object, so no write request may be in flight at the same time.
 //
-//   SLOW queue: the remaining 21 parameters (positioner type, calibration
-//     options, sensor power mode, referencing options, reference type, safe
-//     direction, motor load, channel type, max closed-loop frequency,
-//     logical scale offset, logical scale inversion, channel temperature,
-//     movement type, base unit, base resolution, distance code inverted,
-//     positioner control options, actuator mode, motor load protection
-//     threshold, diagnostic closed-loop frequency max and avg). Polled once
-//     at boot,
-//     then every nSlowReadTime (default 10 s). One read at a time. A failed
-//     read logs / latches and the queue advances to the next entry.
+// Queues:
+//   Two independent state machines, both serializing onto the same slave but
+//   gated against each other so only one SDO request is outstanding at a time.
 //
-// Both queues yield to each other: the fast queue will not start a new
-// ChannelState read while the slow queue has one in flight, and vice versa.
-// Because ChannelState reads are short (sub-100 ms) and the slow refresh
-// cadence is ~10 s, ChannelState almost always wins the bus.
+//     FAST queue: ChannelState only. Polled continuously at nReadTime. This is
+//       the latency-sensitive path that interlocks depend on.
+//
+//     SLOW queue: the remaining 21 parameters (positioner type, calibration
+//       options, sensor power mode, referencing options, reference type, safe
+//       direction, motor load, channel type, max closed-loop frequency,
+//       logical scale offset, logical scale inversion, channel temperature,
+//       movement type, base unit, base resolution, distance code inverted,
+//       positioner control options, actuator mode, motor load protection
+//       threshold, diagnostic closed-loop frequency max and avg), plus the two
+//       soft-limit entries -- NUM_SLOW entries in total. Polled once at boot,
+//       then every tSlowReadInterval (default 30 s). One read at a time. A
+//       failed read is counted and the queue advances to the next entry.
+//
+//   Both queues yield to each other: the fast queue will not start a new
+//   ChannelState read while the slow queue has one in flight, and vice versa.
+//   Because ChannelState reads are short (sub-100 ms) and the slow refresh
+//   cadence is tens of seconds, ChannelState almost always wins the bus.
+//
+//   EVENT queue: one-shot read of the drive error code (0x603F) after a fault
+//   or internal-limit event. Highest priority, still mutually exclusive with
+//   the other two queues.
+//
+// Objectives:
+//   - Keep ChannelState fresh enough for interlock decisions while refreshing
+//     the rarely changing configuration parameters in the background.
+//   - Never leave more than one CoE mailbox request outstanding on the slave.
+//   - Bound every read with a watchdog, so a lost mailbox reply cannot stall a
+//     queue, and keep the resulting failures as diagnostics rather than
+//     user-facing faults.
+//
+// Author:
+//   Yann Stephen Mandza <ysmandza@slac.stanford.edu>
+//   Created 2025-10-28.
+//
+// History:
+//   2025-10-28  Yann Stephen Mandza  Created in the DS402/MCS2 homing and
+//                                    channel-state refactor.
+//   2026-05-19  ysmandza             Split into fast/slow queues with per-read
+//                                    watchdogs to avoid slave CoE mailbox races.
+//   2026-08-07  ysmandza             Eight channel parameters plus the diag
+//                                    closed-loop frequency pair and safe
+//                                    direction added to the read traffic.
+//   2026-08-17  ysmandza             Event queue added to preserve channel
+//                                    fault diagnostics.
+//   2026-08-25  Mandza               Transient ChannelState read failures are
+//                                    counted, not surfaced as faults.
+//   2026-08-29  Mandza               REF_OPT/CAL_OPT stay io:io commands; only
+//                                    their per-bit decode is read-only.
+//   2026-11-28  Documentation pass   POU and method headers plus inline
+//                                    declaration comments added; no logic
+//                                    change.
+// ============================================================================
 
 FUNCTION_BLOCK FB_ReadChanParameters
 VAR_INPUT
+    // TRUE lets the read queues run. FALSE parks every bExecute line and
+    // resets the queue timers without clearing the last read-back values.
+    // Safe-state default: the caller must set it TRUE explicitly.
     bEnable : BOOL;
 END_VAR
 
 VAR_IN_OUT
+    // Stage being watched. Supplies the AMS NetId of the EtherCAT master for
+    // the mailbox calls and the bAxisParamsInit gate that starts the first
+    // sweep. Read-only for this block.
     stMotionStage       : ST_MotionStage;
+    // Channel-parameter image this block owns. Supplies the per-parameter
+    // object indices it reads and receives the read-back values (all NUM_SLOW
+    // slow entries plus the ChannelState word and the drive error code).
     stMCS2ChanParameter : ST_MCS2ChanParameter;
+    // DS402 drive state. Supplies the slave address of the MCS2 mailbox and
+    // the InternalLimitActive flag that arms the event queue. Read-only for
+    // this block.
     stDS402Drive        : ST_DS402Drive;
 END_VAR
 
@@ -56,28 +119,29 @@ VAR
     fbChannelStateRead       : FB_EcCoESdoRead;
     // Event queue
     fbDriveErrCodeRead       : FB_EcCoESdoRead;
-    // Slow queue
-    fbMaxCloseLoopFreqRead   : FB_EcCoESdoRead;
-    fbSoftLimMinRead         : FB_EcCoESdoRead;
-    fbSoftLimMaxRead         : FB_EcCoESdoRead;
-    fbPositionerTypeRead     : FB_EcCoESdoRead;
-    fbCalibrationOptRead     : FB_EcCoESdoRead;
-    fbSensorPowerModeRead    : FB_EcCoESdoRead;
-    fbReferencingOptRead     : FB_EcCoESdoRead;
-    fbReferenceTypeRead      : FB_EcCoESdoRead;
-    fbSafeDirRead            : FB_EcCoESdoRead;
-    fbMotorLoadRead          : FB_EcCoESdoRead;
-    fbChannelTypeRead        : FB_EcCoESdoRead;
-    fbLogicalScaleOffsetRead : FB_EcCoESdoRead;
-    fbLogicalScaleInvRead    : FB_EcCoESdoRead;
-    fbChannelTempRead        : FB_EcCoESdoRead;
-    fbMovementTypeRead       : FB_EcCoESdoRead;
-    fbBaseUnitRead           : FB_EcCoESdoRead;
-    fbBaseResolutionRead     : FB_EcCoESdoRead;
-    fbDistCodeInvRead        : FB_EcCoESdoRead;
-    fbPositionerCtrlOptRead  : FB_EcCoESdoRead;
-    fbActuatorModeRead       : FB_EcCoESdoRead;
-    fbMotorLoadProtRead      : FB_EcCoESdoRead;
+    // Slow queue: one reader per slow-queue entry, ordered exactly like the
+    // index tables in StartSlowRead / SlowReadEdge / SlowReadError.
+    fbMaxCloseLoopFreqRead   : FB_EcCoESdoRead; // Max closed-loop frequency
+    fbSoftLimMinRead         : FB_EcCoESdoRead; // Soft limit, negative end
+    fbSoftLimMaxRead         : FB_EcCoESdoRead; // Soft limit, positive end
+    fbPositionerTypeRead     : FB_EcCoESdoRead; // Positioner type
+    fbCalibrationOptRead     : FB_EcCoESdoRead; // Calibration options word
+    fbSensorPowerModeRead    : FB_EcCoESdoRead; // Sensor power mode
+    fbReferencingOptRead     : FB_EcCoESdoRead; // Referencing options word
+    fbReferenceTypeRead      : FB_EcCoESdoRead; // Reference type
+    fbSafeDirRead            : FB_EcCoESdoRead; // Safe direction
+    fbMotorLoadRead          : FB_EcCoESdoRead; // Motor load (% of rated load)
+    fbChannelTypeRead        : FB_EcCoESdoRead; // Channel type
+    fbLogicalScaleOffsetRead : FB_EcCoESdoRead; // Logical scale offset
+    fbLogicalScaleInvRead    : FB_EcCoESdoRead; // Logical scale inversion
+    fbChannelTempRead        : FB_EcCoESdoRead; // Channel temperature (deg C)
+    fbMovementTypeRead       : FB_EcCoESdoRead; // Movement type
+    fbBaseUnitRead           : FB_EcCoESdoRead; // Base unit
+    fbBaseResolutionRead     : FB_EcCoESdoRead; // Base resolution
+    fbDistCodeInvRead        : FB_EcCoESdoRead; // Distance code inverted
+    fbPositionerCtrlOptRead  : FB_EcCoESdoRead; // Positioner control options
+    fbActuatorModeRead       : FB_EcCoESdoRead; // Actuator mode
+    fbMotorLoadProtRead      : FB_EcCoESdoRead; // Motor load protection threshold
     // Diag closed-loop frequency is a subindexed object (0x202A:1 = max,
     // 0x202A:2 = avg); one reader per subindex.
     fbDiagClfMaxRead         : FB_EcCoESdoRead;
@@ -144,17 +208,23 @@ VAR
 
     // Fast queue (ChannelState)
 
+    // Fast-queue state machine states.
     eFast : (
+        // Parked: bExecute forced FALSE; next cycle re-enters the cadence wait.
         FAST_IDLE          := 0,
+        // Waiting for the nReadTime cadence to elapse. Power-on state.
         FAST_WAIT_CADENCE  := 1,
+        // ChannelState read in flight; watchdog armed.
         FAST_READING       := 2
     ) := FAST_WAIT_CADENCE;
+    // nReadTime cadence timer for the fast queue.
     tonFastCadence : TON;
     // Set on a fault or limit event: the drive error code reports the failed move,
     // not its cause, so the channel state bits must not be up to nReadTime stale.
     bFastReadNow : BOOL;
     // Per-read watchdog for ChannelState.
     tonFastReadTimeout : TON;
+    // Watchdog limit for one ChannelState read (default 2 s).
     tFastReadTimeout : TIME := T#2S;
 
 
@@ -162,39 +232,57 @@ VAR
 
     // 0x603F holds the last channel error and is refreshed by the drive when the
     // Internal Limit flag is set, so it explains limit stops the NC cannot.
+    // Event-queue state machine states.
     eEvt : (
+        // No event read requested or in flight.
         EVT_IDLE    := 0,
+        // Drive error code (0x603F) read in flight; watchdog armed.
         EVT_READING := 1
     ) := EVT_IDLE;
+    // Rising edge on bError or InternalLimitActive: arms a drive-error read.
     rtErrEvent : R_TRIG;
+    // A drive-error read has been requested and not yet started.
     bEvtReadPending : BOOL;
+    // Event-queue read in flight; blocks the fast and slow queues.
     bEvtReadActive : BOOL;
+    // Read watchdog for the event queue.
     tonEvtReadTimeout : TON;
+    // Watchdog limit for one drive-error read (default 2 s).
     tEvtReadTimeout : TIME := T#2S;
 
 
     // Slow queue (everything else)
 
+    // Slow-queue state machine states.
     eSlow : (
+        // Parked: waits for bAxisParamsInit, then restarts at index 1.
         SLOW_IDLE       := 0,
+        // Waiting out tSlowReadInterval between two sweeps.
         SLOW_WAIT_CADENCE := 1,
+        // Sweeping the table, one read at a time.
         SLOW_RUNNING    := 2
     ) := SLOW_IDLE;
     // Index into the slow-queue table. 1..NUM_SLOW; 0 = sweep complete.
     nSlowIdx : INT;
     // TRUE while a slow read is in flight (kick issued, edge not yet seen).
     bSlowReadActive : BOOL;
+    // tSlowReadInterval cadence timer between two sweeps.
     tonSlowCadence : TON;
     // Per-read watchdog: if a slow read doesn't complete in tSlowReadTimeout
     // we count it as a failure, force-clear bExecute, and advance.
     tonSlowReadTimeout : TON;
+    // TRUE once the boot sweep has run to completion. Diagnostic only.
     bFirstSlowSweepDone : BOOL;
 
     // Configurable cadences / timeouts for the slow queue.
+    // Interval between the start of two consecutive sweeps (default 30 s).
     tSlowReadInterval : TIME := T#30S;
+    // Watchdog limit for one slow read (default 2 s).
     tSlowReadTimeout  : TIME := T#2S;
 END_VAR
 VAR CONSTANT
+    // Number of entries in the slow-queue table: the 21 channel parameters
+    // plus the two soft limits. Indices in the CASE tables run 1..NUM_SLOW.
     NUM_SLOW : INT := 23;
 END_VAR
 ]]></Declaration>
@@ -288,7 +376,20 @@ DecodeOptions();
 ]]></ST>
     </Implementation>
     <Method Name="CallAllSdoReaders" Id="{0a000001-0000-0000-0000-000000000009}">
-      <Declaration><![CDATA[// Cyclic call of every SDO reader. Each FB's bExecute is owned by its queue.
+      <Declaration><![CDATA[// ============================================================================
+// CallAllSdoReaders  (PRIVATE)
+// ----------------------------------------------------------------------------
+// Purpose : Cyclically call every SDO reader FB so each one advances its
+//           internal state machine and refreshes bBusy/bError.
+// Usage   : Called once per cycle from the body, and also on the
+//           bEnable = FALSE and invalid-reference park paths so no reader is
+//           left un-ticked. bExecute is never driven here -- the fast, slow
+//           and event queue methods own those lines.
+// Inputs  : none
+// Returns : none
+// History :
+//   2026-11-28  Maintenance (documentation pass)  Header added; no logic change.
+// ============================================================================
 METHOD PRIVATE CallAllSdoReaders
 ]]></Declaration>
       <Implementation>
@@ -526,7 +627,19 @@ fbDiagClfAvgRead(
       </Implementation>
     </Method>
     <Method Name="ClearAllSlowExecutes" Id="{0a000001-0000-0000-0000-000000000005}">
-      <Declaration><![CDATA[METHOD PRIVATE ClearAllSlowExecutes
+      <Declaration><![CDATA[// ============================================================================
+// ClearAllSlowExecutes  (PRIVATE)
+// ----------------------------------------------------------------------------
+// Purpose : Drop every slow-queue bExecute line in a single pass.
+// Usage   : Called on entry to SLOW_IDLE and SLOW_WAIT_CADENCE -- i.e. after a
+//           sweep completes, before a new sweep starts, and every cycle while
+//           the queue is parked -- so no stale request stays asserted.
+// Inputs  : none
+// Returns : none
+// History :
+//   2026-11-28  Maintenance (documentation pass)  Header added; no logic change.
+// ============================================================================
+METHOD PRIVATE ClearAllSlowExecutes
 ]]></Declaration>
       <Implementation>
         <ST><![CDATA[bExecMaxCloseLoopFreq   := FALSE;
@@ -556,8 +669,22 @@ bExecSoftLimMax         := FALSE;
       </Implementation>
     </Method>
     <Method Name="ClearSlowExecute" Id="{0a000001-0000-0000-0000-000000000004}">
-      <Declaration><![CDATA[METHOD PRIVATE ClearSlowExecute
+      <Declaration><![CDATA[// ============================================================================
+// ClearSlowExecute  (PRIVATE)
+// ----------------------------------------------------------------------------
+// Purpose : Drop the bExecute line of one slow-queue entry.
+// Usage   : Called after the read at index <idx> completes or times out. The
+//           index must match the one passed to StartSlowRead, i.e. the
+//           1-based position in the slow-queue table.
+// Inputs  : idx -- slow-queue table index, 1..NUM_SLOW (dimensionless).
+// Returns : none
+// History :
+//   2026-11-28  Maintenance (documentation pass)  Header added; no logic change.
+// ============================================================================
+METHOD PRIVATE ClearSlowExecute
 VAR_INPUT
+    // Slow-queue table index, 1..NUM_SLOW. Values outside that range match no
+    // CASE label and are ignored.
     idx : INT;
 END_VAR
 ]]></Declaration>
@@ -591,9 +718,23 @@ END_CASE
       </Implementation>
     </Method>
     <Method Name="DecodeChannelState" Id="{0a000001-0000-0000-0000-000000000008}">
-      <Declaration><![CDATA[// Unpack the 32-bit raw channel state word into individual flag fields.
+      <Declaration><![CDATA[// ============================================================================
+// DecodeChannelState  (PRIVATE)
+// ----------------------------------------------------------------------------
+// Purpose : Unpack the 32-bit raw ChannelState word into the individual flag
+//           fields of stMCS2ChanParameter.stChannelState, and leave an inferred
+//           MCS2 error code behind as a fallback diagnostic.
+// Usage   : Called from FastQueueStep only after a successful read, so the
+//           flags always match the latest raw word. The inferred code is
+//           overwritten by the 0x603F read when the event queue obtains it.
+// Inputs  : none (operates on the stMCS2ChanParameter reference)
+// Returns : none
+// History :
+//   2026-11-28  Maintenance (documentation pass)  Header added; no logic change.
+// ============================================================================
 METHOD PRIVATE DecodeChannelState
 VAR
+    // Raw 32-bit ChannelState word being unpacked.
     n : UDINT;
 END_VAR
 ]]></Declaration>
@@ -637,10 +778,23 @@ END_IF
       </Implementation>
     </Method>
     <Method Name="DecodeOptions" Id="{7f3a1c02-9b4e-4d21-8a6c-1e2f3a4b5c6d}">
-      <Declaration><![CDATA[// Decode the raw Referencing Options (0x200B) and Calibration Options (0x2004)
-// words read back from the drive into individual read-only flags.
+      <Declaration><![CDATA[// ============================================================================
+// DecodeOptions  (PRIVATE)
+// ----------------------------------------------------------------------------
+// Purpose : Decode the raw Referencing Options (0x200B) and Calibration
+//           Options (0x2004) words read back from the drive into the
+//           individual read-only flag fields of stMCS2ChanParameter.
+// Usage   : Called once per cycle at the end of the body, so the flags follow
+//           the latest read-back words. The words themselves stay the write
+//           path (REF_OPT / CAL_OPT, io:io); only this decode is read-only.
+// Inputs  : none (operates on the stMCS2ChanParameter reference)
+// Returns : none
+// History :
+//   2026-11-28  Maintenance (documentation pass)  Header added; no logic change.
+// ============================================================================
 METHOD PRIVATE DecodeOptions
 VAR
+    // Raw options word currently being decoded (referencing, then calibration).
     n : DWORD;
 END_VAR
 ]]></Declaration>
@@ -663,9 +817,22 @@ stMCS2ChanParameter.bCalLimitedTravelRange := (n AND 16#00000100) <> 0;
       </Implementation>
     </Method>
     <Method Name="EventQueueStep" Id="{0a000001-0000-0000-0000-00000000000a}">
-      <Declaration><![CDATA[// Event queue: one-shot read of the drive error code (0x603F) after a fault or
-// internal-limit event. Highest priority, but still mutually exclusive with the
-// fast and slow queues so only one SDO is outstanding on the mailbox.
+      <Declaration><![CDATA[// ============================================================================
+// EventQueueStep  (PRIVATE)
+// ----------------------------------------------------------------------------
+// Purpose : One-shot read of the drive error code (0x603F) after a fault or
+//           internal-limit event, and watchdog it.
+// Usage   : Called once per cycle from the body. Highest priority of the three
+//           queues, but still mutually exclusive with the fast and slow queues
+//           so only one SDO is outstanding on the mailbox. Starts only when
+//           bEvtReadPending is set, no slow read is in flight and the fast
+//           queue is not in FAST_READING. A timeout is swallowed: an inferred
+//           or previously read code is kept for diagnostics.
+// Inputs  : none (uses bEvtReadPending, bSlowReadActive, eFast)
+// Returns : none
+// History :
+//   2026-11-28  Maintenance (documentation pass)  Header added; no logic change.
+// ============================================================================
 METHOD PRIVATE EventQueueStep
 ]]></Declaration>
       <Implementation>
@@ -706,9 +873,22 @@ END_CASE
       </Implementation>
     </Method>
     <Method Name="FastQueueStep" Id="{0a000001-0000-0000-0000-000000000001}">
-      <Declaration><![CDATA[// Fast queue: poll ChannelState at nReadTime cadence. Yields the bus to the
-// slow and event queues if one of those reads is currently in flight, but does
-// not back off any further -- as soon as that read completes the fast read can fire.
+      <Declaration><![CDATA[// ============================================================================
+// FastQueueStep  (PRIVATE)
+// ----------------------------------------------------------------------------
+// Purpose : Poll ChannelState at the nReadTime cadence, the latency-sensitive
+//           path interlocks depend on, and watchdog each read.
+// Usage   : Called once per cycle from the body. Yields the bus to the slow and
+//           event queues while one of their reads is in flight, but does not
+//           back off any further -- as soon as that read completes the fast
+//           read can fire. bFastReadNow forces an immediate read after a fault
+//           or limit event. A failed or hung read is counted in
+//           nFastReadFailures and retried on the next cadence.
+// Inputs  : none (uses bFastReadNow, bSlowReadActive, bEvtReadActive)
+// Returns : none
+// History :
+//   2026-11-28  Maintenance (documentation pass)  Header added; no logic change.
+// ============================================================================
 METHOD PRIVATE FastQueueStep
 ]]></Declaration>
       <Implementation>
@@ -762,9 +942,22 @@ END_CASE
       </Implementation>
     </Method>
     <Method Name="SlowQueueStep" Id="{0a000001-0000-0000-0000-000000000002}">
-      <Declaration><![CDATA[// Slow queue: sweep through 21 entries once at boot, then refresh every
-// tSlowReadInterval. One entry at a time. A failed read latches a counter
-// and advances -- it does not stall the sweep or affect the fast queue.
+      <Declaration><![CDATA[// ============================================================================
+// SlowQueueStep  (PRIVATE)
+// ----------------------------------------------------------------------------
+// Purpose : Sweep the NUM_SLOW slow-queue entries once at boot, then refresh
+//           the whole table every tSlowReadInterval.
+// Usage   : Called once per cycle from the body. One entry at a time; each read
+//           is watchdogged by tSlowReadTimeout. A failed or hung read increments
+//           nSlowReadFailures and advances -- it never stalls the sweep and
+//           never affects the fast queue. Yields while a fast or event read is
+//           in flight. Sets bFirstSlowSweepDone / bAllReadsComplete when a sweep
+//           finishes.
+// Inputs  : none (uses eSlow, nSlowIdx, bSlowReadActive)
+// Returns : none
+// History :
+//   2026-11-28  Maintenance (documentation pass)  Header added; no logic change.
+// ============================================================================
 METHOD PRIVATE SlowQueueStep
 ]]></Declaration>
       <Implementation>
@@ -844,9 +1037,24 @@ END_CASE
       </Implementation>
     </Method>
     <Method Name="SlowReadEdge" Id="{0a000001-0000-0000-0000-000000000006}">
-      <Declaration><![CDATA[// Return TRUE on the cycle the read at <idx> completes (busy->idle).
+      <Declaration><![CDATA[// ============================================================================
+// SlowReadEdge  (PRIVATE)
+// ----------------------------------------------------------------------------
+// Purpose : Return TRUE on the cycle the read at index <idx> completes, i.e. on
+//           the falling edge of that reader's bBusy.
+// Usage   : Called from SLOW_RUNNING once per cycle while a slow read is in
+//           flight. Maps the 1-based slow-queue index onto the matching F_TRIG,
+//           so the index must stay in step with StartSlowRead.
+// Inputs  : idx -- slow-queue table index, 1..NUM_SLOW (dimensionless).
+// Returns : BOOL -- TRUE for exactly one cycle when that read finishes; FALSE
+//           for an out-of-range index.
+// History :
+//   2026-11-28  Maintenance (documentation pass)  Header added; no logic change.
+// ============================================================================
 METHOD PRIVATE SlowReadEdge : BOOL
 VAR_INPUT
+    // Slow-queue table index, 1..NUM_SLOW. Values outside that range return
+    // FALSE.
     idx : INT;
 END_VAR
 ]]></Declaration>
@@ -882,9 +1090,24 @@ END_CASE
       </Implementation>
     </Method>
     <Method Name="SlowReadError" Id="{0a000001-0000-0000-0000-000000000007}">
-      <Declaration><![CDATA[// Return the .bError flag for the read at <idx> after completion.
+      <Declaration><![CDATA[// ============================================================================
+// SlowReadError  (PRIVATE)
+// ----------------------------------------------------------------------------
+// Purpose : Return the .bError flag of the reader for slow-queue index <idx>,
+//           sampled after that read completed.
+// Usage   : Called from SLOW_RUNNING on the completion edge, to decide whether
+//           the finished read counts as a failure. Maps the index exactly like
+//           SlowReadEdge.
+// Inputs  : idx -- slow-queue table index, 1..NUM_SLOW (dimensionless).
+// Returns : BOOL -- TRUE when the last attempt at that entry reported an error;
+//           FALSE for an out-of-range index.
+// History :
+//   2026-11-28  Maintenance (documentation pass)  Header added; no logic change.
+// ============================================================================
 METHOD PRIVATE SlowReadError : BOOL
 VAR_INPUT
+    // Slow-queue table index, 1..NUM_SLOW. Values outside that range return
+    // FALSE.
     idx : INT;
 END_VAR
 ]]></Declaration>
@@ -920,9 +1143,23 @@ END_CASE
       </Implementation>
     </Method>
     <Method Name="StartSlowRead" Id="{0a000001-0000-0000-0000-000000000003}">
-      <Declaration><![CDATA[// Issue bExecute=TRUE for the slow-queue entry at the given index.
+      <Declaration><![CDATA[// ============================================================================
+// StartSlowRead  (PRIVATE)
+// ----------------------------------------------------------------------------
+// Purpose : Assert bExecute on the slow-queue entry at the given index, which
+//           starts one SDO read.
+// Usage   : Called from SLOW_RUNNING when no slow read is in flight. The caller
+//           then sets bSlowReadActive and arms tSlowReadTimeout. The index must
+//           stay in step with SlowReadEdge / SlowReadError / ClearSlowExecute.
+// Inputs  : idx -- slow-queue table index, 1..NUM_SLOW (dimensionless).
+// Returns : none
+// History :
+//   2026-11-28  Maintenance (documentation pass)  Header added; no logic change.
+// ============================================================================
 METHOD PRIVATE StartSlowRead
 VAR_INPUT
+    // Slow-queue table index, 1..NUM_SLOW. Values outside that range match no
+    // CASE label, so no execute line is asserted.
     idx : INT;
 END_VAR
 ]]></Declaration>
