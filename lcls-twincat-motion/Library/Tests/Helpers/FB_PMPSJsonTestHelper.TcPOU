@@ -6,6 +6,12 @@
     Create a JSON doc in memory to match the input structs
     Assumes 1 device for simplicity
     Writes to the global pmps json doc
+
+    The caller-supplied astBeamParams reference is validated before it is
+    dereferenced, and the state iteration is clamped to the bounds of the
+    local fixed-size arrays (ajsonState and the string conversion arrays)
+    so an unbound reference or an oversized caller array cannot index out
+    of bounds.
 *)
 VAR_IN_OUT
     astBeamParams: ARRAY[*] OF ST_DbStateParams;
@@ -25,6 +31,9 @@ VAR
 
     nIter: DINT;
     nId: DINT;
+    // State iteration limits: intersection of the caller array and the local arrays
+    nLowerBound: DINT;
+    nUpperBound: DINT;
 
     aseVRange: ARRAY[0..GeneralConstants.MAX_STATES] OF STRING;
     asRate: ARRAY[0..GeneralConstants.MAX_STATES] OF STRING;
@@ -34,14 +43,33 @@ END_VAR
 ]]></Declaration>
     <Implementation>
       <ST><![CDATA[
+// Reject an unbound caller array instead of dereferencing an invalid pointer
+IF NOT __ISVALIDREF(astBeamParams) THEN
+    RETURN;
+END_IF
+
 rtExec(CLK:=bExecute);
 IF NOT rtExec.Q THEN
     RETURN;
 END_IF
 
+// Clamp the state iteration to the local arrays sized 0..GeneralConstants.MAX_STATES.
+// ajsonState, aseVRange, asRate, asBCRange and asTran all share these bounds.
+nLowerBound := LOWER_BOUND(astBeamParams, 1);
+nUpperBound := UPPER_BOUND(astBeamParams, 1);
+IF nLowerBound < LOWER_BOUND(ajsonState, 1) THEN
+    nLowerBound := LOWER_BOUND(ajsonState, 1);
+END_IF
+IF nUpperBound > UPPER_BOUND(ajsonState, 1) THEN
+    nUpperBound := UPPER_BOUND(ajsonState, 1);
+END_IF
+IF nUpperBound < nLowerBound THEN
+    RETURN;
+END_IF
+
 jsonRoot := fbJson.NewDocument();
 jsonDevice := fbJson.AddObjectMember(jsonRoot, sDevName);
-FOR nIter := LOWER_BOUND(astBeamParams, 1) TO UPPER_BOUND(astBeamParams, 1) DO
+FOR nIter := nLowerBound TO nUpperBound DO
     ajsonState[nIter] := fbJson.AddObjectMember(jsonDevice, astBeamParams[nIter].sPmpsState);
 
     nId := nId + 1;
