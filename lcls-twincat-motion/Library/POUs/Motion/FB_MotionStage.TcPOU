@@ -235,9 +235,11 @@ fbDriveVirtual(En:=TRUE,
     Axis:=stMotionStage.Axis);
 
 // Some custom home handling
+// The homing fault latch clears only through the explicit reset request from a known-safe state
 fbMotionHome(
     stMotionStage:=stMotionStage,
-    bExecute:=bExecHome);
+    bExecute:=bExecHome,
+    bReset:=stMotionStage.bReset);
 
 // Update status again after the move starts or stops
 stMotionStage.Axis.ReadStatus();

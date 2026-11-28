@@ -1,12 +1,33 @@
 ﻿<?xml version="1.0" encoding="utf-8"?>
 <TcPlcObject Version="1.1.0.1">
   <POU Name="FB_MotionHoming" Id="{89795143-e01c-4e96-8d50-67b6176895fe}" SpecialFunc="None">
-    <Declaration><![CDATA[FUNCTION_BLOCK FB_MotionHoming
+    <Declaration><![CDATA[(*
+    FB_MotionHoming: homing sequence for a single motion stage.
+
+    Usage: call once per cycle from the owning motion stage function block with
+    stMotionStage linked to the stage being homed and bExecute driven by the homing
+    command. nHomingMode selects the homing strategy.
+
+    Objectives: drive the axis to the home signal according to the configured homing
+    mode and leave the position valid for normal motion.
+
+    Faults are latched and are cleared only by a dedicated reset request (bReset)
+    made while the command is inactive and the axis is at rest; deasserting bExecute
+    does not dismiss a fault.
+
+    History:
+    2026-11: a latched fault now clears only through the explicit bReset input from a
+             known-safe state; the previous bExecute-dependent clear was removed.
+*)
+FUNCTION_BLOCK FB_MotionHoming
 VAR_IN_OUT
     stMotionStage: ST_MotionStage;
 END_VAR
 VAR_INPUT
+    (* Homing command: executes on the rising edge, aborts on the falling edge *)
     bExecute: BOOL;
+    (* Fault acknowledge: clears a latched bError, only honored from a known-safe state *)
+    bReset: BOOL;
 END_VAR
 VAR_OUTPUT
     bBusy: BOOL;
@@ -55,8 +76,13 @@ fbSetPos.Options.ClearPositionLag := TRUE;
 rtExec(CLK:=bExecute);
 ftExec(CLK:=bExecute);
 
-bError R= NOT bExecute;
-IF NOT bError THEN
+(*
+    Acknowledge a latched fault. Only an explicit reset request, made while the command
+    is inactive and the axis is at rest, clears bError. Dropping bExecute on its own
+    must never dismiss a fault.
+*)
+IF bReset AND NOT bExecute AND nHomeStateMachine = IDLE AND stMotionStage.Axis.Status.NotMoving THEN
+    bError := FALSE;
     nErrorID := 0;
 END_IF
 
@@ -110,13 +136,13 @@ IF bMove THEN
                 Axis:=stMotionStage.Axis,
                 JogForward:=FALSE,
                 JogBackwards:=FALSE);
-            IF rtExec.Q THEN
+            // A new run starts only when no fault is latched: a latched fault is
+            // cleared by bReset, never by re-asserting or dropping the command.
+            IF rtExec.Q AND NOT bError THEN
                 nHomeStateMachine := NEXT_MOVE;
                 nMoves := 0;
                 bDone := FALSE;
                 bBusy := TRUE;
-                bError := FALSE;
-                nErrorID := 0;
                 bInterrupted := FALSE;
             END_IF
         // Figure out whether to move forward, move backward, or give up
@@ -237,7 +263,8 @@ IF bMove THEN
                 Position:=stMotionStage.fHomePosition);
             nHomeStateMachine := IDLE;
             bBusy := FALSE;
-            bDone := TRUE;
+            // Never report Done for a run that ended in a latched fault
+            bDone := NOT bError;
         ERROR:
             bError := TRUE;
             nErrorID := fbJog.ErrorID;
