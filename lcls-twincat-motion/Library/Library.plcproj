@@ -645,6 +645,9 @@
     <Compile Include="Tests\FB_MCS2DriveManager_Test.TcPOU">
       <SubType>Code</SubType>
     </Compile>
+    <Compile Include="Tests\FB_MCS2Home_Test.TcPOU">
+      <SubType>Code</SubType>
+    </Compile>
     <Compile Include="Tests\FB_MotionClearAsserts_Test.TcPOU">
       <SubType>Code</SubType>
     </Compile>

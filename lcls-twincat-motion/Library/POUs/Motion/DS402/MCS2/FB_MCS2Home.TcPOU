@@ -4,6 +4,13 @@
     <Declaration><![CDATA[FUNCTION_BLOCK FB_MCS2Home
 VAR_INPUT
     bExecute : BOOL;
+    // Watchdog for the whole homing request, started on the rising edge of
+    // bExecute and cleared when the request finishes, fails or is aborted. The
+    // reference move and the MC_SetPosition sync that follows it both wait on
+    // external signals that may never arrive, so the wait is bounded here.
+    // Configure per stage; the default covers a slow end-stop search plus the
+    // NC position sync.
+    tHomeTimeout : TIME := T#60S;
 END_VAR
 VAR_IN_OUT
     stDS402Drive         : ST_DS402Drive;
@@ -23,6 +30,8 @@ VAR
     bHalt : BOOL;
     {attribute 'hide'}
     tonSettlingTime     : TON;
+    {attribute 'hide'}
+    tonHomeTimeout      : TON;
     {attribute 'hide'}
     rtHomeMove               : R_TRIG;
     fbSetPos: MC_SetPosition;
@@ -124,6 +133,36 @@ CASE eStepState OF
 END_CASE
 
 tonSettlingTime(PT:=T#80MS);
+
+// Homing watchdog. Every wait in the states above is on an external completion
+// signal: the drive's TargetReached/Bit12 status bits for the reference move,
+// and MC_SetPosition's Done/Error for the NC position sync that follows it.
+// Neither is guaranteed to arrive -- an axis that stays disabled or never
+// reaches the end stop never asserts them, and MC_SetPosition reports neither
+// Done nor Error while it is still queued -- so the request is bounded here
+// instead of leaving bHomeMoveBusy set forever.
+tonHomeTimeout(IN := bHomeMoveBusy, PT := tHomeTimeout);
+
+// The ERROR state is excluded: it is entered on a drive fault in the same scan
+// the watchdog can expire, and the fault code already recorded there is the more
+// specific diagnosis.
+IF tonHomeTimeout.Q AND eStepState <> E_MoveState.ERROR THEN
+    // Drop the homing command bit so the drive stops the reference move, and
+    // cancel the position sync when that is what we were waiting on.
+    stDS402Drive.nDriveControl.4 := FALSE;
+    IF eStepState = E_MoveState.DONE THEN
+        fbSetPos(Axis := stMotionStage.Axis, Execute := FALSE);
+    END_IF
+    bHomeMoveBusy := FALSE;
+    bHomeMoveDone := FALSE;
+    bHomeMoveAborted := TRUE;
+    // Count the request as failed and latch an explicit timeout fault, cleared
+    // by the caller's reset like every other motion fault.
+    stMotionStage.bError := TRUE;
+    stMotionStage.nErrorId := E_LCLSMotionError.TIMEOUT;
+    eStepState := E_MoveState.ERROR;
+END_IF
+
 bHalt := FALSE;
 bReset := FALSE;]]></ST>
     </Implementation>

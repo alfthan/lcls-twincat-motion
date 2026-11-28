@@ -1,0 +1,158 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="FB_MCS2Home_Test" Id="{d0a5b3f1-6c42-4e0a-9c11-7f3b2d8e4c50}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+    Unit tests for FB_MCS2Home.
+
+    Homing is a sequence of waits on signals the PLC does not own: the drive
+    reports the end-stop reference move through the DS402 status word
+    (TargetReached / Bit12), and MC_SetPosition reports the NC position sync
+    through Done / Error. If either never reports, the request must still
+    terminate: the block aborts it and latches an explicit timeout fault rather
+    than sitting on bHomeMoveBusy forever.
+*)
+FUNCTION_BLOCK FB_MCS2Home_Test EXTENDS TcUnit.FB_TestSuite
+VAR
+END_VAR
+]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[TestTimeoutAbortsRequest();
+TestRequestRestartsAfterFaultCleared();
+]]></ST>
+    </Implementation>
+    <Method Name="TestTimeoutAbortsRequest" Id="{d0a5b3f1-6c42-4e0a-9c11-7f3b2d8e4c51}">
+      <Declaration><![CDATA[METHOD PRIVATE TestTimeoutAbortsRequest
+VAR_INST
+    fbSut         : FB_MCS2Home;
+    stMotionStage : ST_MotionStage;
+    stDrive       : ST_DS402Drive;
+    tonSuiteGuard : TON;
+    nState        : UINT;
+END_VAR
+]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[TEST('TestTimeoutAbortsRequest');
+
+// The drive never asserts TargetReached/Bit12, so the reference move never
+// reports completion. A short watchdog keeps the test bounded.
+CASE nState OF
+    0:
+        fbSut(
+            bExecute      := TRUE,
+            tHomeTimeout  := T#20MS,
+            stDS402Drive  := stDrive,
+            stMotionStage := stMotionStage
+        );
+        AssertTrue(fbSut.bHomeMoveBusy, 'Homing must be busy right after the rising edge');
+        nState := 10;
+
+    10:
+        fbSut(
+            bExecute      := TRUE,
+            tHomeTimeout  := T#20MS,
+            stDS402Drive  := stDrive,
+            stMotionStage := stMotionStage
+        );
+        IF fbSut.bHomeMoveAborted THEN
+            AssertFalse(fbSut.bHomeMoveBusy, 'Timeout must drop busy');
+            AssertFalse(fbSut.bHomeMoveDone, 'A timed out request must not report done');
+            AssertFalse(stDrive.nDriveControl.4, 'Timeout must clear the homing command bit');
+            AssertTrue(stMotionStage.bError, 'Timeout must latch the stage error');
+            AssertTrue(stMotionStage.nErrorId = 16#7904, 'Timeout must report the homing timeout error id');
+            nState := 20;
+        END_IF
+
+    20:
+        // The fault latches: only the caller's reset clears it.
+        fbSut(
+            bExecute      := TRUE,
+            tHomeTimeout  := T#20MS,
+            stDS402Drive  := stDrive,
+            stMotionStage := stMotionStage
+        );
+        AssertTrue(stMotionStage.bError, 'Timeout fault must stay latched until reset');
+        AssertTrue(fbSut.bHomeMoveAborted, 'Aborted flag must stay set until a new request');
+        TEST_FINISHED();
+END_CASE
+
+// Watchdog for the test itself: fail the case instead of hanging the suite.
+tonSuiteGuard(IN := TRUE, PT := T#5S);
+IF tonSuiteGuard.Q AND nState < 20 THEN
+    nState := 20;
+    AssertTrue(FALSE, 'Homing timeout did not fire within the test window');
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="TestRequestRestartsAfterFaultCleared" Id="{d0a5b3f1-6c42-4e0a-9c11-7f3b2d8e4c52}">
+      <Declaration><![CDATA[METHOD PRIVATE TestRequestRestartsAfterFaultCleared
+VAR_INST
+    fbSut         : FB_MCS2Home;
+    stMotionStage : ST_MotionStage;
+    stDrive       : ST_DS402Drive;
+    tonSuiteGuard : TON;
+    nState        : UINT;
+END_VAR
+]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[TEST('TestRequestRestartsAfterFaultCleared');
+
+CASE nState OF
+    0:
+        fbSut(
+            bExecute      := TRUE,
+            tHomeTimeout  := T#20MS,
+            stDS402Drive  := stDrive,
+            stMotionStage := stMotionStage
+        );
+        nState := 10;
+
+    10:
+        fbSut(
+            bExecute      := TRUE,
+            tHomeTimeout  := T#20MS,
+            stDS402Drive  := stDrive,
+            stMotionStage := stMotionStage
+        );
+        IF fbSut.bHomeMoveAborted THEN
+            // Caller acknowledges the timeout fault.
+            stMotionStage.bError := FALSE;
+            nState := 15;
+        END_IF
+
+    15:
+        // Execute released and fault cleared: the block returns to idle.
+        fbSut(
+            bExecute      := FALSE,
+            tHomeTimeout  := T#20MS,
+            stDS402Drive  := stDrive,
+            stMotionStage := stMotionStage
+        );
+        AssertFalse(fbSut.bHomeMoveBusy, 'Acknowledged request must stay idle');
+        nState := 20;
+
+    20:
+        // A fresh rising edge must start a clean request.
+        fbSut(
+            bExecute      := TRUE,
+            tHomeTimeout  := T#20MS,
+            stDS402Drive  := stDrive,
+            stMotionStage := stMotionStage
+        );
+        AssertTrue(fbSut.bHomeMoveBusy, 'A new request must start after the fault is cleared');
+        AssertFalse(fbSut.bHomeMoveAborted, 'A new request must clear the aborted flag');
+        nState := 30;
+
+    30:
+        TEST_FINISHED();
+END_CASE
+
+// Watchdog for the test itself: fail the case instead of hanging the suite.
+tonSuiteGuard(IN := TRUE, PT := T#5S);
+IF tonSuiteGuard.Q AND nState < 30 THEN
+    nState := 30;
+    AssertTrue(FALSE, 'Homing request did not reach the restart check within the test window');
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+  </POU>
+</TcPlcObject>

@@ -34,6 +34,7 @@ END_VAR
     E_LCLSMotionError.UNSAFE: msg:='Position state unsafe';
     E_LCLSMotionError.INVALID: msg:='Position state invalid';
     E_LCLSMotionError.MCS2_FAULT: msg:='MCS2 drive fault, NC did not latch';
+    E_LCLSMotionError.TIMEOUT: msg:='Homing timeout: homing sequence did not complete';
     E_LCLSMotionError.TEST: msg:='Fake testing error';
 
     // Fallbacks
