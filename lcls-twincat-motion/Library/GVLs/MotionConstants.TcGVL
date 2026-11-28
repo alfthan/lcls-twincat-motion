@@ -15,6 +15,28 @@ VAR_GLOBAL CONSTANT
     If you are not sure how many motors are used per state block, check MOTION_GVL.nMaxStateMotorCount
     *)
     MAX_STATE_MOTORS: UINT := 3;
+
+    (*
+    Homing soft limit shift
+
+    FB_MotionHoming re-references the axis position with MC_SetPosition before a homing search so
+    that the configured soft limit does not stop the search before it reaches the hardware limit
+    switch or the home switch. The shift is derived from the configured soft limits instead of
+    being a fixed "effectively infinite" number, so that every commanded position is bounded and
+    can be validated against the axis configuration before it reaches the axis.
+    *)
+
+    // Margin placed outside the configured soft limit range, as a multiple of the configured soft
+    // limit span. Covers axes whose mechanical travel is longer than their soft limit range.
+    MOTION_HOMING_SETPOS_SPAN_FACTOR: LREAL := 100.0;
+    // A configured soft limit span larger than this is treated as a misconfiguration: a search
+    // position derived from it can no longer be validated.
+    MOTION_HOMING_MAX_SOFT_LIMIT_SPAN: LREAL := 1.0E7;
+    // Hard cap on the magnitude of a position derived by the homing routine. A larger value means
+    // that the axis configuration is not sane, so homing faults instead of commanding it.
+    MOTION_HOMING_MAX_SETPOS_MAGNITUDE: LREAL := 1.0E9;
+    // Maximum time to wait for the NC axis parameters that the homing shift is derived from
+    MOTION_HOMING_PARAMS_TIMEOUT: TIME := T#5S;
 END_VAR]]></Declaration>
   </GVL>
 </TcPlcObject>

@@ -2,6 +2,34 @@
 <TcPlcObject Version="1.1.0.1">
   <POU Name="FB_MotionHoming" Id="{89795143-e01c-4e96-8d50-67b6176895fe}" SpecialFunc="None">
     <Declaration><![CDATA[FUNCTION_BLOCK FB_MotionHoming
+(*
+    Custom homing routine for one axis, driven by stMotionStage.nHomingMode.
+
+    Search modes (E_EpicsHomeCmd):
+    - LOW_LIMIT / HOME_VIA_LOW: search in the negative direction
+    - HIGH_LIMIT / HOME_VIA_HIGH: search in the positive direction
+    - ABSOLUTE_SET: no search, only re-reference the position to fHomePosition
+    - NONE: not a homing request, only report busy/done
+
+    The search jogs towards the hardware limit switch or the home switch at the search velocity,
+    then re-references the axis position to stMotionStage.fHomePosition and jogs off the switch at
+    the slower sync velocity.
+
+    Soft limits:
+    A search has to be able to run past the configured soft limits to reach the hardware limit
+    switch. Instead of switching the soft limit monitoring of the NC off and on again (which has to
+    be restored afterwards, otherwise a silent failure leaves the axis unprotected), the axis
+    position is re-referenced with MC_SetPosition so that the soft limit blocking the search
+    direction is placed outside of the configured travel range. The shift is derived from the NC
+    axis parameters and validated before it is commanded - never a fixed "effectively infinite"
+    number - so an axis whose limits cannot be validated faults instead of being commanded an
+    arbitrary position. The position is re-referenced to fHomePosition when the routine completes
+    or faults, so the soft limits are always meaningful again afterwards.
+
+    History:
+    - 2026-11-28: derive and validate the MC_SetPosition search shift from the configured soft
+      limits instead of commanding a fixed +/-99999999 (audit finding, task 403)
+*)
 VAR_IN_OUT
     stMotionStage: ST_MotionStage;
 END_VAR
@@ -27,6 +55,19 @@ VAR
     bMove: BOOL;
     nErrCount: INT;
     bInterrupted: BOOL;
+    // Set position to command before the next search, derived from the NC axis parameters
+    fSearchSetPos: LREAL;
+    // TRUE if a configured soft limit blocks the search, so that fSearchSetPos must be written
+    bSearchNeedsSetPos: BOOL;
+    // TRUE if fSearchSetPos was derived from, and validated against, the NC axis parameters
+    bSearchSetPosOk: BOOL;
+    // Configured span of the axis soft limits, in EU
+    fSoftLimitSpan: LREAL;
+    // Bounds the wait for the NC axis parameters that the search shift is derived from
+    fbParamsTimer: TON;
+    // Error id and message latched for a fault detected by this FB instead of by a motion FB
+    nFaultId: UDINT;
+    sFaultMsg: STRING;
 END_VAR
 VAR CONSTANT
     IDLE: INT := 0;
@@ -37,17 +78,6 @@ VAR CONSTANT
     FINAL_SETPOS: INT := 5;
     ERROR: INT := 6;
     WAIT_STOP: INT := 7;
-
-    (*
-        This is a simpler way of disabling the soft limits that ends up being really obvious if something has gone wrong.
-        If you turn the limits off/on, not only do you need to keep track of if you had soft limits set,
-        but you need to always restore this properly or risk some issue.
-        Instead, I set position to a ridiculous value that can always move forward or backward.
-        If this gets stuck for any reason it's very clear that something has gone wrong,
-        rather than a silent failure of the soft limit marks.
-    *)
-    FWD_START: LREAL := -99999999;
-    BWD_START: LREAL :=  99999999;
 END_VAR]]></Declaration>
     <Implementation>
       <ST><![CDATA[
@@ -110,6 +140,8 @@ IF bMove THEN
                 Axis:=stMotionStage.Axis,
                 JogForward:=FALSE,
                 JogBackwards:=FALSE);
+            // Restart the bounded wait for the axis parameters with every new homing request
+            fbParamsTimer(IN:=FALSE);
             IF rtExec.Q THEN
                 nHomeStateMachine := NEXT_MOVE;
                 nMoves := 0;
@@ -118,6 +150,10 @@ IF bMove THEN
                 bError := FALSE;
                 nErrorID := 0;
                 bInterrupted := FALSE;
+                nFaultId := 0;
+                sFaultMsg := '';
+                fSearchSetPos := 0;
+                bSearchNeedsSetPos := FALSE;
             END_IF
         // Figure out whether to move forward, move backward, or give up
         NEXT_MOVE:
@@ -128,33 +164,91 @@ IF bMove THEN
                 Axis:=stMotionStage.Axis,
                 JogForward:=FALSE,
                 JogBackwards:=FALSE);
-            CASE nMoves OF
-                0:
-                    IF bFirstDirection THEN
-                        nStateAfterStop := CHECK_FWD;
-                    ELSE
-                        nStateAfterStop := CHECK_BWD;
-                    END_IF
-                1:
-                    IF NOT bFirstDirection THEN
-                        nStateAfterStop := CHECK_FWD;
-                    ELSE
-                        nStateAfterStop := CHECK_BWD;
-                    END_IF
-                ELSE
+            // The search shift below is derived from the NC axis parameters, so they must be known.
+            // Waiting for them is bounded: an axis that never reports them is a fault.
+            fbParamsTimer(
+                IN:=NOT stMotionStage.bAxisParamsInit,
+                PT:=MotionConstants.MOTION_HOMING_PARAMS_TIMEOUT);
+            IF NOT stMotionStage.bAxisParamsInit THEN
+                IF fbParamsTimer.Q THEN
                     nStateAfterStop := ERROR;
-            END_CASE
-            nMoves := nMoves + 1;
-            IF bAtHome THEN
-                nStateAfterStop := FINAL_MOVE;
+                    nFaultId := E_LCLSMotionError.INVALID_SOFTSET;
+                    sFaultMsg := 'Homing failure: axis parameters unavailable';
+                    nHomeStateMachine := WAIT_STOP;
+                END_IF
+            ELSE
+                CASE nMoves OF
+                    0:
+                        IF bFirstDirection THEN
+                            nStateAfterStop := CHECK_FWD;
+                        ELSE
+                            nStateAfterStop := CHECK_BWD;
+                        END_IF
+                    1:
+                        IF NOT bFirstDirection THEN
+                            nStateAfterStop := CHECK_FWD;
+                        ELSE
+                            nStateAfterStop := CHECK_BWD;
+                        END_IF
+                    ELSE
+                        nStateAfterStop := ERROR;
+                END_CASE
+                nMoves := nMoves + 1;
+                IF bAtHome THEN
+                    nStateAfterStop := FINAL_MOVE;
+                END_IF
+
+                // Derive the set position for the direction we are about to search in.
+                // The soft limit that would stop the search is placed one large margin (a multiple
+                // of the configured soft limit span) outside of the configured soft limit range,
+                // so the whole configured travel range plus that margin is available towards the
+                // switch. The result is validated against the axis configuration before it is
+                // commanded: an axis whose limits we cannot validate faults instead of being
+                // commanded an arbitrary position.
+                fSearchSetPos := 0;
+                bSearchNeedsSetPos := FALSE;
+                bSearchSetPosOk := TRUE;
+                IF nStateAfterStop = CHECK_FWD OR nStateAfterStop = CHECK_BWD THEN
+                    // Only a soft limit that is actually monitored can stop the search
+                    bSearchNeedsSetPos :=
+                        (nStateAfterStop = CHECK_FWD
+                            AND stMotionStage.stAxisParameters.bEncEnableSoftEndMaxControl.0)
+                        OR (nStateAfterStop = CHECK_BWD
+                            AND stMotionStage.stAxisParameters.bEncEnableSoftEndMinControl.0);
+                    IF bSearchNeedsSetPos THEN
+                        fSoftLimitSpan := stMotionStage.stAxisParameters.fEncSoftEndMax
+                            - stMotionStage.stAxisParameters.fEncSoftEndMin;
+                        bSearchSetPosOk := fSoftLimitSpan > 0
+                            AND fSoftLimitSpan <= MotionConstants.MOTION_HOMING_MAX_SOFT_LIMIT_SPAN;
+                        IF bSearchSetPosOk THEN
+                            IF nStateAfterStop = CHECK_FWD THEN
+                                fSearchSetPos := stMotionStage.stAxisParameters.fEncSoftEndMin
+                                    - fSoftLimitSpan * MotionConstants.MOTION_HOMING_SETPOS_SPAN_FACTOR;
+                            ELSE
+                                fSearchSetPos := stMotionStage.stAxisParameters.fEncSoftEndMax
+                                    + fSoftLimitSpan * MotionConstants.MOTION_HOMING_SETPOS_SPAN_FACTOR;
+                            END_IF
+                            // Never command a position that the axis could not plausibly represent
+                            bSearchSetPosOk :=
+                                ABS(fSearchSetPos) <= MotionConstants.MOTION_HOMING_MAX_SETPOS_MAGNITUDE;
+                        END_IF
+                        IF NOT bSearchSetPosOk THEN
+                            fSearchSetPos := 0;
+                            bSearchNeedsSetPos := FALSE;
+                            nStateAfterStop := ERROR;
+                            nFaultId := E_LCLSMotionError.INVALID_SOFTSET;
+                            sFaultMsg := 'Homing failure: invalid soft limit configuration';
+                        END_IF
+                    END_IF
+                END_IF
+                nHomeStateMachine := WAIT_STOP;
             END_IF
-            nHomeStateMachine := WAIT_STOP;
         // Move forward until we find the home signal or reach end of travel
         CHECK_FWD:
             fbSetPos(
                 Axis:=stMotionStage.Axis,
-                Execute:=TRUE,
-                Position:=FWD_START);
+                Execute:=bSearchNeedsSetPos,
+                Position:=fSearchSetPos);
             fbJog(
                 Axis:=stMotionStage.Axis,
                 JogForward:=stMotionStage.bLimitForwardEnable AND NOT bATHome,
@@ -177,8 +271,8 @@ IF bMove THEN
         CHECK_BWD:
             fbSetPos(
                 Axis:=stMotionStage.Axis,
-                Execute:=TRUE,
-                Position:=BWD_START);
+                Execute:=bSearchNeedsSetPos,
+                Position:=fSearchSetPos);
             fbJog(
                 Axis:=stMotionStage.Axis,
                 JogForward:=FALSE,
@@ -240,15 +334,21 @@ IF bMove THEN
             bDone := TRUE;
         ERROR:
             bError := TRUE;
-            nErrorID := fbJog.ErrorID;
             nHomeStateMachine := FINAL_SETPOS;
             fbSetPos(
                 Axis:=stMotionStage.Axis,
                 Execute:=FALSE);
-            IF bInterrupted THEN
-                stMotionStage.sCustomErrorMessage := 'Homing interrupted';
+            IF nFaultId <> 0 THEN
+                // A fault detected by this FB, e.g. a soft limit configuration we refuse to use
+                nErrorID := nFaultId;
+                stMotionStage.sCustomErrorMessage := sFaultMsg;
             ELSE
-                stMotionStage.sCustomErrorMessage := 'Homing failure';
+                nErrorID := fbJog.ErrorID;
+                IF bInterrupted THEN
+                    stMotionStage.sCustomErrorMessage := 'Homing interrupted';
+                ELSE
+                    stMotionStage.sCustomErrorMessage := 'Homing failure';
+                END_IF
             END_IF
         WAIT_STOP:
             IF stMotionStage.Axis.Status.NotMoving THEN
