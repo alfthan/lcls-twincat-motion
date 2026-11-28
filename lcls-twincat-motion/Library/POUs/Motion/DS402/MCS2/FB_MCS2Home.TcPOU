@@ -2,29 +2,115 @@
 <TcPlcObject Version="1.1.0.1">
   <POU Name="FB_MCS2Home" Id="{ce23061a-c26c-43ea-9803-dbb2bfd48aba}" SpecialFunc="None">
     <Declaration><![CDATA[FUNCTION_BLOCK FB_MCS2Home
+// =============================================================================
+// FB_MCS2Home - DS402/MCS2 manual (drive-side) homing sequence
+//
+// Purpose:
+//     Runs the drive-internal referencing (homing) move on an MCS2 channel that
+//     the caller has already put into DS402 manual HOME mode, and then re-syncs
+//     the NC axis to the drive readback so the NC position matches the
+//     referenced drive position.
+//
+// Usage:
+//     Call exactly once per PLC cycle from the HOME branch of the mode state
+//     machine. bExecute is edge triggered: a rising edge starts one homing
+//     sequence, which then runs to completion on its own - dropping bExecute
+//     does NOT abort it, call Halt() for that. The caller must have the drive
+//     operational in HOME mode before bExecute is raised (this block reports an
+//     error but never switches modes itself) and must keep calling the block
+//     until bHomeMoveBusy is FALSE. stDS402Drive and stMotionStage are passed by
+//     reference and are updated in place: the block writes the DS402 control
+//     word bits and latches stMotionStage.bError on a drive fault.
+//
+// Objectives:
+//     * Always run the full referencing move, even when the drive already
+//       reports Homing Attained; these stick-slip stages use incremental
+//       encoders, so re-referencing is the only way to clear undetected
+//       lost-count / slip drift (required for slit-blade re-homing without a
+//       power cycle).
+//     * Stay non-blocking and observable: one named state per step, no wait
+//       loops, busy/done/aborted reported to the caller every cycle.
+//     * Report done only after the NC has been re-synced to the drive, so the
+//       caller can safely re-enable position-lag monitoring and return to CSP
+//       on the done edge (reporting earlier trips a following error).
+//
+// States (eStepState, E_MoveState):
+//     IDLING      waiting for the bExecute rising edge.
+//     INIT        set the mode-specific enable bit; abort to ERROR on a latched
+//                 axis error.
+//     STARTED     wait for the drive to leave the reference position.
+//     IN_PROGRESS wait for reference attained plus settling time; Halt() aborts,
+//                 a mode-specific fault/warning latches stMotionStage.bError.
+//     INTERRUPTED drop the homing run bit, release busy, back to IDLING.
+//     DONE        drop the homing run bit, re-sync the NC axis (MC_SetPosition),
+//                 then report bHomeMoveDone.
+//     ERROR       release busy/done and hold until the axis error is cleared.
+//
+// History:
+//     2026-11-28  Added POU header, method headers and declaration comments
+//                 (convention: open every POU with a header and comment every
+//                 declaration). Documentation only, no functional change.
+//                 Author: taio-generic-0 (Scirix agent).
+//     Earlier revisions predate this header and are recorded in git history.
+// =============================================================================
 VAR_INPUT
+    // Home request. Executes on the rising edge only: TRUE does not re-trigger a
+    // sequence that is already running, and going FALSE does not stop it (use
+    // Halt() to abort). Level HIGH is not a "keep homing" command.
     bExecute : BOOL;
 END_VAR
 VAR_IN_OUT
+    // DS402/PDO image of the drive channel (by reference, updated in place).
+    // Carries the control word nDriveControl [bit field, UINT] written by this
+    // block - bit 3 = manual-mode enable, bit 4 = homing run - and the status
+    // word stDriveStatus read back from the drive.
     stDS402Drive         : ST_DS402Drive;
+    // Motion stage / NC axis interface (by reference, updated in place).
+    // Supplies stMotionStage.Axis (for MC_SetPosition) and the raw encoder count
+    // nEncoderCount [encoder counts, UDINT] used as the reference position, and
+    // receives the bError latch and the bDone clear.
     stMotionStage        : ST_MotionStage;
 END_VAR
 
 VAR_OUTPUT
+    // TRUE from the accepted bExecute rising edge until the sequence ends, i.e.
+    // while the drive is moving/referencing or the NC re-sync is pending.
     bHomeMoveBusy        : BOOL;
+    // TRUE once the drive reports the reference position AND the NC axis has been
+    // re-synced to it. Holds until the next sequence starts, an abort, or an error.
     bHomeMoveDone        : BOOL;
+    // TRUE when the sequence stopped because Halt() was called (user stop, not a
+    // drive fault). Holds until the next sequence starts. Implies bHomeMoveDone
+    // = FALSE and no new stMotionStage.bError.
     bHomeMoveAborted     : BOOL;
 END_VAR
 VAR
+    // Current step of the homing sequence. IDLING = waiting for a request; see the
+    // POU header for the full state list. Initialised so a first scan is idle.
     eStepState           : E_MoveState := E_MoveState.IDLING;
+    // Reset request latch. Set by Reset() for one cycle and cleared at the end of
+    // every cycle. NOTE: FB_MCS2Home does not evaluate this flag (unlike
+    // FB_MCS2Calibrate); the caller (FB_MotionStageMCS2) performs the reset
+    // housekeeping itself. Kept for interface symmetry with the other MCS2 blocks.
     {attribute 'hide'}
     bReset :  BOOL;
+    // Abort request latch. Set by Halt() for one cycle and cleared at the end of
+    // every cycle, so a halt never persists. Only honoured in state IN_PROGRESS.
     {attribute 'hide'}
     bHalt : BOOL;
+    // Settling timer [ms], started when the homing run is requested. The reference
+    // is only accepted after it has elapsed (PT = 80 ms, set in the body), so the
+    // drive's reference bit must be stable rather than a single-cycle pulse.
     {attribute 'hide'}
     tonSettlingTime     : TON;
+    // Rising-edge detector on bExecute. rtHomeMove.Q is the one-cycle start
+    // request that arms the IDLING -> INIT transition.
     {attribute 'hide'}
     rtHomeMove               : R_TRIG;
+    // NC position setter used in state DONE to write the referenced position into
+    // the NC axis: position [EU] = nEncoderCount [counts] *
+    // fEncScaleFactorInternal [EU/count] + fEncOffset [EU]. Waiting for its Done
+    // clears the position lag built up by the drive-side move.
     fbSetPos: MC_SetPosition;
 END_VAR
 ]]></Declaration>
@@ -129,7 +215,39 @@ bReset := FALSE;]]></ST>
     </Implementation>
     <Method Name="Halt" Id="{78d12c46-c454-4a04-8c5c-259167f6d305}">
       <Declaration><![CDATA[METHOD Halt : BOOL
+// =============================================================================
+// Halt - request an abort of the homing sequence that is currently running.
+//
+// Purpose:
+//     User-stop channel for the block: stops the drive-side homing move without
+//     waiting for it to reach the reference position.
+//
+// Usage:
+//     Call from the caller's stop path (FB_MotionStageMCS2 does this when the
+//     execute input is dropped mid-move). No arguments. Sets a one-cycle bHalt
+//     latch, which the state machine consumes in state IN_PROGRESS only: it sets
+//     bHomeMoveAborted, clears the drive's homing run bit (nDriveControl.4) and
+//     returns to IDLING. Ignored in every other state, so calling it when no
+//     sequence is running is harmless. The latch is cleared at the end of every
+//     call of the block, so call Halt() before invoking the block in the same
+//     cycle or the request is lost.
+//
+// Objectives:
+//     Leave the drive in manual mode with the homing run bit cleared and the axis
+//     otherwise untouched, so the caller can immediately re-request homing or
+//     switch back to CSP. An abort is not a fault: stMotionStage.bError is not set.
+//
+// Returns:
+//     BOOL - not assigned by this method (always FALSE). Read bHomeMoveAborted for
+//     the outcome; it is set on the next call of the block.
+//
+// History:
+//     2026-11-28  Method header added (convention: open every method with a
+//                 header). Documentation only, no functional change.
+//                 Author: taio-generic-0 (Scirix agent).
+// =============================================================================
 VAR_INPUT
+    // No inputs: the abort request carries no parameters.
 END_VAR
 ]]></Declaration>
       <Implementation>
@@ -138,7 +256,41 @@ END_VAR
     </Method>
     <Method Name="Reset" Id="{5d9bcf8a-a2d5-48c3-b1e1-6c473a08984e}">
       <Declaration><![CDATA[METHOD Reset : BOOL
+// =============================================================================
+// Reset - reset request channel of the block.
+//
+// Purpose:
+//     Symmetrical reset entry point shared by the MCS2 sequence blocks, so a
+//     caller can clear every block from one reset path without knowing which
+//     one is active.
+//
+// Usage:
+//     Call from the caller's reset path (FB_MotionStageMCS2 calls it while it
+//     handles stMotionStage.bReset). No arguments. Sets a one-cycle bReset
+//     latch, cleared again at the end of the same call of the block.
+//
+// Objectives:
+//     Keep the block's reset interface consistent with FB_MCS2Calibrate /
+//     FB_MCS2StepMode without changing how homing is aborted.
+//
+// Returns:
+//     BOOL - not assigned by this method (always FALSE).
+//
+// Known limitation:
+//     FB_MCS2Home does not evaluate bReset (FB_MCS2Calibrate does). Resetting a
+//     running homing sequence therefore has no effect from inside this block -
+//     the caller clears stMotionStage.bExecute/bError and drops the mode request,
+//     and Halt() is the input that aborts an in-progress move. Documented as-is
+//     rather than changed, because altering the abort path of a motion block is a
+//     behavioural change outside this documentation task.
+//
+// History:
+//     2026-11-28  Method header added (convention: open every method with a
+//                 header). Documentation only, no functional change.
+//                 Author: taio-generic-0 (Scirix agent).
+// =============================================================================
 VAR_INPUT
+    // No inputs: the reset request carries no parameters.
 END_VAR
 ]]></Declaration>
       <Implementation>
