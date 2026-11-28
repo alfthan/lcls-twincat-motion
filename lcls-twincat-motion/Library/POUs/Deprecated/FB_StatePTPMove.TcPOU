@@ -4,6 +4,10 @@
     <Declaration><![CDATA[{attribute 'obsolete' := 'Use FB_PositionStateMove instead'}
 FUNCTION_BLOCK FB_StatePTPMove
 // Do not use, this is deprecated
+// Requests an absolute move to stPositionState and waits for it to complete.
+// The wait is bounded by tTimeout: on expiry the move is aborted the same way as
+// a normal abort and bError is raised with sError = 'PTP move timeout' instead of
+// waiting forever for a stalled axis, lost drive or failed state transition.
 VAR_INPUT
     {attribute 'pytmc' := '
         pv:
@@ -19,6 +23,10 @@ VAR_INPUT
     bExecute: BOOL;
 
     bMoveOk: BOOL;
+
+    // Maximum time to wait for the commanded move to complete before raising a timeout fault.
+    // Must be greater than zero for a useful bound; a zero value faults on the first cycle.
+    tTimeout: TIME := T#30S;
 END_VAR
 VAR_IN_OUT
     stMotionStage: ST_MotionStage;
@@ -68,6 +76,12 @@ VAR
     fActPosition: LREAL;
     fLowPos: LREAL;
     fHighPos: LREAL;
+
+    // Bounds the wait for the motion to complete (watchdog for stMotionStage.bBusy)
+    tonMoveTimeout: TON;
+
+    // Latched: TRUE after a commanded move timed out without completing. Cleared by a new command.
+    bTimedOut: BOOL;
 END_VAR
 ]]></Declaration>
     <Implementation>
@@ -82,10 +96,10 @@ IF bExecTrig.Q AND bMoveOk THEN
         stMotionStage.fDeceleration := stPositionState.fDecel;
         bDone := FALSE;
         bBusy := TRUE;
+        // A new command starts a fresh watchdog and clears the previous timeout fault
+        bTimedOut := FALSE;
     END_IF
 END_IF
-bError := stMotionStage.bError;
-sError := stMotionStage.sErrorMessage;
 
 fActPosition := stMotionStage.stAxisStatus.fActPosition;
 fLowPos := stPositionState.fPosition - stPositionState.fDelta;
@@ -110,6 +124,25 @@ IF NOT stMotionStage.bExecute OR NOT bExecute THEN
     bDone := TRUE;
     bBusy := FALSE;
     bExecute := FALSE;
+END_IF
+
+// Bound the wait for the motion to complete: while a move is outstanding, run the watchdog
+tonMoveTimeout(IN:=bBusy, PT:=tTimeout);
+IF tonMoveTimeout.Q THEN
+    // Abort the move through the same path as a normal abort, then latch the fault
+    stMotionStage.bExecute := FALSE;
+    bDone := TRUE;
+    bBusy := FALSE;
+    bExecute := FALSE;
+    bTimedOut := TRUE;
+END_IF
+
+// Surface the axis fault or our own timeout fault, with an explicit message
+bError := stMotionStage.bError OR bTimedOut;
+IF bTimedOut THEN
+    sError := 'PTP move timeout';
+ELSE
+    sError := stMotionStage.sErrorMessage;
 END_IF]]></ST>
     </Implementation>
   </POU>
