@@ -2,6 +2,39 @@
 <TcPlcObject Version="1.1.0.1">
   <POU Name="FB_MotionStageSetAndMoveHelper" Id="{d7e042f5-46bb-44d9-bf49-77a017ae9e25}" SpecialFunc="None">
     <Declaration><![CDATA[FUNCTION_BLOCK FB_MotionStageSetAndMoveHelper
+(*
+    Bring a motion stage into a known position before a unit test runs:
+    reset the stage, redefine its axis position to fStartPosition, then move it to fGoalPosition.
+
+    The sequence is an explicit, non-blocking state machine (nState) that performs at most one
+    action per cycle, so no two phases of the sequence can ever overlap:
+
+        WAIT_EXEC     idle, waiting for the rising edge of bExecute
+        RESET_STAGE   clear errors, deactivate the stage, release the set-position command
+        SET_POSITION  redefine the axis position to fStartPosition
+        START_MOVE    re-enable the stage and command the move to fGoalPosition
+        WAIT_MOVE     wait for the axis to arrive at fGoalPosition
+        DONE          move finished, hold the stage reset until the request is dropped
+
+    Documented transitions:
+        WAIT_EXEC    -> RESET_STAGE   on the rising edge of bExecute
+        RESET_STAGE  -> SET_POSITION  unconditionally, this is a one-cycle action state
+        SET_POSITION -> START_MOVE    when the position readback equals fStartPosition
+        START_MOVE   -> WAIT_MOVE     when the axis is enabled and the move was commanded
+        WAIT_MOVE    -> DONE          when bMoveDone reports arrival at fGoalPosition
+        DONE         -> WAIT_EXEC     when bExecute is FALSE, ready for the next request
+
+    bMoveDone is a level status and is only acted on in WAIT_MOVE, so an axis that already sits
+    at fGoalPosition cannot cut the reset or the set-position phase short.
+
+    The motion stage must be updated by its own FB_MotionStage or an equivalent outside of
+    this function block.
+
+    History:
+        2026-11-28: rewritten as an explicit CASE state machine with named states
+                    (replaces the previous nested IF/ELSE phase flags, which allowed a
+                    move-done indication to trigger a reset before the set position finished)
+*)
 VAR_INPUT
     // Begin on rising edge, stop on falling edge.
     bExecute: BOOL;
@@ -18,68 +51,113 @@ VAR_IN_OUT
     stMotionStage: ST_MotionStage;
 END_VAR
 VAR_OUTPUT
-    // Goes to TRUE once the motor has no errors and is deactivated.
+    // Goes to TRUE once the motor has no errors and is deactivated. Level status, updated every cycle.
     bResetDone: BOOL;
-    // Goes to TRUE once the set position completes.
+    // Goes to TRUE once the set position completes. Latched until the next rising edge of bExecute.
     bSetDone: BOOL;
-    // Goes to TRUE once the motor begins moving.
+    // Goes to TRUE once the motor begins moving. Latched until the next rising edge of bExecute.
     bMotionStarted: BOOL;
-    // Goes to TRUE once the motor reaches its destination.
+    // Goes to TRUE while the motor is within fDelta of fGoalPosition. Level status, updated every cycle.
     bMoveDone: BOOL;
 END_VAR
 VAR
     rtExec: R_TRIG;
     mcSetPos: MC_SetPosition;
+    // Current state of the reset/set-position/move sequence, starts in WAIT_EXEC (0)
+    nState: UINT := 0;
+END_VAR
+// Named states of the reset/set-position/move sequence, see the header comment for the transitions
+VAR CONSTANT
+    // Idle, waiting for the rising edge of bExecute
+    WAIT_EXEC: UINT := 0;
+    // Clear errors, deactivate the stage and release the set-position command
+    RESET_STAGE: UINT := 1;
+    // Redefine the axis position to fStartPosition
+    SET_POSITION: UINT := 2;
+    // Re-enable the stage and command the move to fGoalPosition
+    START_MOVE: UINT := 3;
+    // Wait for the axis to arrive at fGoalPosition
+    WAIT_MOVE: UINT := 4;
+    // Move complete, hold the stage reset until the next request
+    DONE: UINT := 5;
 END_VAR
 ]]></Declaration>
     <Implementation>
       <ST><![CDATA[rtExec(CLK:=bExecute);
 
-IF rtExec.Q THEN
-    stMotionStage.bReset := TRUE;
-    stMotionStage.bEnable := FALSE;
-    stMotionStage.nEnableMode := E_StageEnableMode.NEVER;
-    mcSetPos(
-        Axis:=stMotionStage.Axis,
-        Execute:=FALSE
-    );
-    bResetDone := FALSE;
-    bSetDone := FALSE;
-    bMotionStarted := FALSE;
-    bMoveDone := FALSE;
-END_IF
-
+// Level status outputs, valid every cycle regardless of the current state
 bResetDone := NOT stMotionStage.bError AND NOT stMotionStage.bBusy;
 bMoveDone := stMotionStage.Axis.NcToPlc.ActPos <= fGoalPosition + fDelta AND
              stMotionStage.Axis.NcToPlc.ActPos >= fGoalPosition - fDelta;
 
-IF NOT bSetDone THEN
-    stMotionStage.bReset := TRUE;
-    stMotionStage.bEnable := FALSE;
-    IF stMotionStage.stAxisStatus.fActPosition <> fStartPosition THEN
+CASE nState OF
+    // Idle. The outputs of a completed request stay as they are until the next one starts.
+    WAIT_EXEC:
+        IF rtExec.Q THEN
+            // Start every request from the same known output state
+            bSetDone := FALSE;
+            bMotionStarted := FALSE;
+            nState := RESET_STAGE;
+        END_IF
+
+    // Clear errors and deactivate the stage. One action per cycle, then hand over unconditionally.
+    RESET_STAGE:
+        stMotionStage.bReset := TRUE;
+        stMotionStage.bEnable := FALSE;
+        stMotionStage.nEnableMode := E_StageEnableMode.NEVER;
         mcSetPos(
             Axis:=stMotionStage.Axis,
-            Execute:=NOT mcSetPos.Execute,
-            Position:=fStartPosition,
-            Mode:=FALSE,
-            Done=>
+            Execute:=FALSE
         );
-    ELSE
-        bSetDone := TRUE;
-    END_IF
-ELSE
-    stMotionStage.bEnable := TRUE;
-    IF NOT bMotionStarted AND NOT stMotionStage.Axis.Status.Disabled THEN
-        stMotionStage.fPosition := fGoalPosition;
-        stMotionStage.fVelocity := fVelocity;
-        stMotionStage.bMoveCmd := TRUE;
-        bMotionStarted := TRUE;
-    END_IF
-END_IF
+        nState := SET_POSITION;
 
-IF bMoveDone THEN
-    stMotionStage.bReset := TRUE;
-END_IF
+    // Redefine the axis position to fStartPosition while the stage stays reset and deactivated.
+    SET_POSITION:
+        stMotionStage.bReset := TRUE;
+        stMotionStage.bEnable := FALSE;
+        stMotionStage.nEnableMode := E_StageEnableMode.NEVER;
+        IF stMotionStage.stAxisStatus.fActPosition <> fStartPosition THEN
+            // Keep the set-position command asserted until the readback matches fStartPosition
+            mcSetPos(
+                Axis:=stMotionStage.Axis,
+                Execute:=NOT mcSetPos.Execute,
+                Position:=fStartPosition,
+                Mode:=FALSE
+            );
+        ELSE
+            // Position readback matches fStartPosition: release the command and move on
+            mcSetPos(
+                Axis:=stMotionStage.Axis,
+                Execute:=FALSE
+            );
+            bSetDone := TRUE;
+            nState := START_MOVE;
+        END_IF
+
+    // Re-introduce the enable, wait for the axis to leave the disabled state, then command one move.
+    START_MOVE:
+        stMotionStage.bEnable := TRUE;
+        IF NOT stMotionStage.Axis.Status.Disabled THEN
+            stMotionStage.fPosition := fGoalPosition;
+            stMotionStage.fVelocity := fVelocity;
+            stMotionStage.bMoveCmd := TRUE;
+            bMotionStarted := TRUE;
+            nState := WAIT_MOVE;
+        END_IF
+
+    // Wait for the axis to arrive. bMoveDone is only acted on from this state.
+    WAIT_MOVE:
+        IF bMoveDone THEN
+            nState := DONE;
+        END_IF
+
+    // Move complete: hold the stage reset until the request is dropped.
+    DONE:
+        stMotionStage.bReset := TRUE;
+        IF NOT bExecute THEN
+            nState := WAIT_EXEC;
+        END_IF
+END_CASE
 ]]></ST>
     </Implementation>
     <Method Name="Reset" Id="{099bbc37-1b9e-476a-b5a9-5f8f1f38a75e}">
@@ -104,6 +182,8 @@ bResetDone := FALSE;
 bSetDone := FALSE;
 bMotionStarted := FALSE;
 bMoveDone := FALSE;
+// Abandon any in-progress sequence and wait for the next request
+nState := WAIT_EXEC;
 ]]></ST>
       </Implementation>
     </Method>
