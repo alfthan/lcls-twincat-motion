@@ -4,6 +4,10 @@
     <Declaration><![CDATA[FUNCTION_BLOCK FB_MCS2Calibrate
 VAR_INPUT
     bExecute : BOOL;
+    // Overall bound on the calibration move. On expiry the move is aborted, the
+    // drive Run bit is dropped and a fault is latched, so a stuck or unresponsive
+    // positioner cannot hold the sequence in IN_PROGRESS forever.
+    tMoveTimeout : TIME := T#10S;
 END_VAR
 VAR_IN_OUT
     stDS402Drive         : ST_DS402Drive;
@@ -23,6 +27,11 @@ VAR
     bHalt : BOOL;
     {attribute 'hide'}
     tonSettlingTime     : TON;
+    // Overall move watchdog: runs only while the block is in IN_PROGRESS, so it is
+    // started on entry to the state and cleared on exit rather than being measured
+    // from an arbitrary point in the cycle.
+    {attribute 'hide'}
+    tonMoveTimeout      : TON;
     {attribute 'hide'}
     rtCalibrateMove: R_TRIG;
 END_VAR
@@ -65,6 +74,16 @@ CASE eStepState OF
         ELSIF stDS402Drive.stDriveStatus.Bit13_OpModeSpecific THEN
             stMotionStage.bError := TRUE;
             eStepState := E_MoveState.ERROR;
+        ELSIF tonMoveTimeout.Q THEN
+            // The drive never reported calibration attained within tMoveTimeout.
+            // Stop commanding Run, end the move and latch an explicit fault so the
+            // sequence leaves IN_PROGRESS instead of hanging there silently.
+            // Latched as an error rather than bCalibrateMoveAborted: this is a
+            // drive/mechanics failure, not an operator stop, so it must be reset.
+            stDS402Drive.nDriveControl.4 := FALSE;
+            stMotionStage.bError := TRUE;
+            stMotionStage.nErrorId := E_LCLSMotionError.MCS2_CALIBRATE_TIMEOUT;
+            eStepState := E_MoveState.ERROR;
         ELSE
             IF tonSettlingTime.Q AND stDS402Drive.stDriveStatus.TargetReached
               AND stDS402Drive.stDriveStatus.Bit12_OpModeSpecific THEN
@@ -95,6 +114,10 @@ CASE eStepState OF
 END_CASE
 
 tonSettlingTime(PT:=T#80MS);
+// Move watchdog: IN is driven from the state itself, so the timer starts on the
+// first cycle in IN_PROGRESS and is cleared as soon as the state is left. A
+// completed, aborted or faulted move therefore cannot carry time into the next.
+tonMoveTimeout(IN := (eStepState = E_MoveState.IN_PROGRESS), PT := tMoveTimeout);
 bHalt := FALSE;
 bReset := FALSE;]]></ST>
     </Implementation>
