@@ -110,7 +110,8 @@ STRUCT
     bReset: BOOL;
     // Used internally and by the IOC to start or stop a move
     bExecute: BOOL;
-    // Used by the IOC to disable an axis
+    // Used by the IOC to enable an axis. Defaults to FALSE: the axis stays disabled
+    // until an enable is explicitly requested by the IOC or the PLC program.
     {attribute 'pytmc' := '
         pv: PLC:bUserEnable
         io: io
@@ -119,7 +120,7 @@ STRUCT
         field: DESC Used to disable power entirely for an axis
         autosave_pass1: VAL
     '}
-    bUserEnable: BOOL := 1;
+    bUserEnable: BOOL := FALSE;
 
     (* Shortcut Commands *)
     // Start a move to fPosition with fVelocity

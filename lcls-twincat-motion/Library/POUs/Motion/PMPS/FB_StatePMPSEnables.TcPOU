@@ -10,8 +10,10 @@
     When not at the goal, the motor can only move toward the goal.
     When at the goal, the motor can move within the position's delta.
 
-    With no goals or other strange states, the motor is permitted to move in either direction
-    to help restore it to a known position.
+    The directional permits sent to MC_POWER default to FALSE (withdrawn) and are only
+    asserted TRUE when a valid goal establishes bounds, or when the caller explicitly
+    authorizes motion without bounds via bUnboundedMotionAuthorized. An unset or invalid
+    state therefore leaves both directions de-energized.
 *)
 VAR_IN_OUT
     // The motor with a position state.
@@ -30,14 +32,19 @@ VAR_INPUT
     eStatePMPSStatus: E_StatePMPSStatus;
     // Connect to the BPTM
     bTransitionAuthorized: BOOL;
+    // Set to TRUE to authorize motion in both directions while no bounds are established
+    // (no valid goal yet, or the limit checks are disabled via bEnable = FALSE).
+    // Only wire this to an explicit, known-good condition such as maintenance mode, which
+    // also raises a fast fault. It defaults to FALSE so an unset state leaves the permits withdrawn.
+    bUnboundedMotionAuthorized: BOOL;
 END_VAR
 VAR_OUTPUT
     // The enable state we send to MC_Power. This is a pass-through from stMotionStage.
     bEnabled: BOOL;
-    // The forward enable state we send to MC_Power. This may be a pass-through or an override to FALSE.
-    bForwardEnabled: BOOL;
-    // The backwards enable state we send to MC_Power. This may be a pass-through or an override to FALSE.
-    bBackwardEnabled: BOOL;
+    // The forward enable state we send to MC_Power. Defaults to FALSE and is only asserted TRUE with a valid authorization.
+    bForwardEnabled: BOOL := FALSE;
+    // The backwards enable state we send to MC_Power. Defaults to FALSE and is only asserted TRUE with a valid authorization.
+    bBackwardEnabled: BOOL := FALSE;
     // TRUE if there is a valid goal position and FALSE otherwise. This makes a fast fault if FALSE.
     bValidGoal: BOOL;
 END_VAR
@@ -139,7 +146,14 @@ ffNoGoal(
 (*
     This action sets bForwardEnable and bBackwardEnable based on
     the current position and the calculated bounds.
+
+    Both permits default to FALSE (withdrawn) on every scan and are only
+    asserted TRUE in a branch that has a valid authorization to move, so an
+    unset, invalid or stale state can never leave a direction enabled.
 *)
+bForwardEnabled := FALSE;
+bBackwardEnabled := FALSE;
+
 IF bLockBounds THEN
     // Prevent forward/backward motion if the position of the axis is outside of the upper/lower bounds respectively.
     // Prevent forward/backward motion if the command to the axis is outside of the upper/lower bounds respectively.
@@ -153,8 +167,10 @@ IF bLockBounds THEN
         stMotionStage.sCustomErrorMessage := CONCAT(CONCAT(CONCAT(
             'Limits exceeded for most recent PMPS position state: ', LREAL_TO_FMTSTR(fLowerPos,5,TRUE)), ' < pos < '), LREAL_TO_FMTSTR(fUpperPos,5,TRUE));
     END_IF
-ELSE
-    // Either invalid state with a fault or FB not enabled
+ELSIF bUnboundedMotionAuthorized THEN
+    // Either no valid goal has been established yet or the limit checks were disabled
+    // via bEnable = FALSE. Moving in both directions is only permitted because the caller
+    // has explicitly authorized motion without bounds.
     bForwardEnabled := TRUE;
     bBackwardEnabled := TRUE;
 END_IF

@@ -11,6 +11,7 @@ VAR
     fbMotorTestSuite 	: FB_MotorTestSuite;
     stMotionStage 		: ST_MotionStage := (sName := 'RATTM:MOTION',
                                                 bPowerSelf := TRUE,
+                                                bUserEnable := TRUE,
                                                 nEnableMode:= ENUM_StageEnableMode.ALWAYS,
                                                 fHomePosition:=0.0,
                                                 nHomingMode:=ENUM_EpicsHomeCmd.LOW_LIMIT);

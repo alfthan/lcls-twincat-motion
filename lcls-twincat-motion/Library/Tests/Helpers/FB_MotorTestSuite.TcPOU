@@ -16,13 +16,17 @@
       <Declaration><![CDATA[METHOD SetEnables
 (*
     Set a motion stage's enables such that it is fully allowed to move.
+
+    ST_MotionStage.bUserEnable defaults to FALSE, so it must be requested
+    explicitly here before any move can be powered.
 *)
 VAR_IN_OUT
     stMotionStage: ST_MotionStage;
 END_VAR
 ]]></Declaration>
       <Implementation>
-        <ST><![CDATA[stMotionStage.bHardwareEnable := TRUE;
+        <ST><![CDATA[stMotionStage.bUserEnable := TRUE;
+stMotionStage.bHardwareEnable := TRUE;
 stMotionStage.bLimitBackwardEnable := TRUE;
 stMotionStage.bLimitForwardEnable := TRUE;
 stMotionStage.bPowerSelf := TRUE;]]></ST>

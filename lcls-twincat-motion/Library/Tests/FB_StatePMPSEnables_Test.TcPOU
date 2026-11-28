@@ -67,6 +67,7 @@ TestMoveTo(8);
 TestMoveAt(9);
 TestBoundsAfterFallingIntoUnknownState(10,-20,-40);
 TestBoundsAfterFallingIntoUnknownState(11,20,40);
+TestUnboundedMotionAuthorized(12);
 
 IF bOneTestDone THEN
     bOneTestDone := FALSE;
@@ -484,13 +485,13 @@ IF tonTimer.Q OR fbMove.bSetDone THEN
         fbFFHWO.q_xFastFaultOut,
         'Fast fault in normal situation',
     );
-    AssertTrue(
+    AssertFalse(
         fbStateEnables.bBackwardEnabled,
-        'Backward disabled when fb is supposed to be disabled',
+        'Backward permit not withdrawn when the limit checks are disabled',
     );
-    AssertTrue(
+    AssertFalse(
         fbStateEnables.bForwardEnabled,
-        'Forward disabled when fb is supposed to be disabled',
+        'Forward permit not withdrawn when the limit checks are disabled',
     );
     bOneTestDone := TRUE;
     TEST_FINISHED();
@@ -806,6 +807,75 @@ AssertFalse(
 
 bOneTestDone := TRUE;
 TEST_FINISHED();
+]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="TestUnboundedMotionAuthorized" Id="{92078628-229f-420e-9d6e-8cf9a1262ca2}">
+      <Declaration><![CDATA[METHOD TestUnboundedMotionAuthorized
+VAR_INPUT
+    nTestID: UINT;
+END_VAR
+VAR_INST
+    fbStateEnables: FB_StatePMPSEnables;
+    fbFFHWO: FB_HardwareFFOutput := (bAutoReset := TRUE);
+    fbMove: FB_TestHelperSetAndMove;
+
+    bInit: BOOL;
+END_VAR
+]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[
+TEST('TestUnboundedMotionAuthorized');
+IF nTestCounter <> nTestID THEN
+    RETURN;
+END_IF
+
+SetEnablesPMPS(stMotionStage);
+
+// Set position to be below the goal's range
+fbMove(
+    stMotionStage:=stMotionStage,
+    bExecute:=bInit,
+    fStartPosition:=astPositionState[nGoalState].fPosition - 100 * astPositionState[nGoalState].fDelta,
+    fGoalPosition:=astPositionState[nGoalState].fPosition - 100 * astPositionState[nGoalState].fDelta,
+    fVelocity:=1,
+    bHWEnable:=FALSE,
+);
+bInit := TRUE;
+
+// Run our FB with the limit checks disabled and unbounded motion explicitly authorized.
+// This is the only way to keep both permits granted without established bounds.
+fbStateEnables(
+    stMotionStage:=stMotionStage,
+    astPositionState:=astPositionState,
+    fbFFHWO:=fbFFHWO,
+    bEnable:=FALSE,
+    nGoalStateIndex:=nGoalState,
+    bUnboundedMotionAuthorized:=TRUE,
+);
+
+fbFFHWO.EvaluateOutput();
+// If we've set the position OR ran out of time to set the position, check the asserts
+IF tonTimer.Q OR fbMove.bSetDone THEN
+    AssertFalse(
+        tonTimer.Q,
+        'Timeout in test',
+    );
+    AssertTrue(
+        fbFFHWO.q_xFastFaultOut,
+        'Fast fault in normal situation',
+    );
+    AssertTrue(
+        fbStateEnables.bForwardEnabled,
+        'Forward permit not granted with an explicit unbounded motion authorization',
+    );
+    AssertTrue(
+        fbStateEnables.bBackwardEnabled,
+        'Backward permit not granted with an explicit unbounded motion authorization',
+    );
+    bOneTestDone := TRUE;
+    TEST_FINISHED();
+END_IF
 ]]></ST>
       </Implementation>
     </Method>

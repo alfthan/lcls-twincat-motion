@@ -8,6 +8,10 @@
 
     Each motor has a virtual "allowed" range of motion based on its goal position.
     Motors can move toward their goal delta ranges or within them, but not away from these ranges.
+
+    The per-motor directional permits default to FALSE. They are only asserted TRUE for a
+    valid goal with established bounds, or, in maintenance mode, because bMaintMode is the
+    explicit authorization to move without bounds (see bUnboundedMotionAuthorized).
 *)
 VAR_IN_OUT
     // The motors with a combined N-dimensional state
@@ -83,6 +87,8 @@ FOR nIter := 1 TO nActiveMotorCount DO
         nGoalStateIndex:=nGoalStateIndex,
         eStatePMPSStatus:=eStatePMPSStatus,
         bTransitionAuthorized:=bTransitionAuthorized,
+        // Maintenance mode is the explicit authorization to move without bounds.
+        bUnboundedMotionAuthorized:=bMaintMode,
         bEnabled=>abEnabled[nIter],
         bForwardEnabled=>abForwardEnabled[nIter],
         bBackwardEnabled=>abBackwardEnabled[nIter],
