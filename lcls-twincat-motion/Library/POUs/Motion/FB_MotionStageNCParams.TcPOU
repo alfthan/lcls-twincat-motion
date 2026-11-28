@@ -3,22 +3,53 @@
   <POU Name="FB_MotionStageNCParams" Id="{ffafdde1-c9c9-04ad-2047-9434c7439ed8}" SpecialFunc="None">
     <Declaration><![CDATA[FUNCTION_BLOCK FB_MotionStageNCParams
 (*
-    Read and refresh axis parameters struct on ST_MotionStage
+    Read and refresh the axis parameters struct on ST_MotionStage.
+
+    Usage:
+        Call once per cycle with bEnable TRUE. stMotionStage.stAxisParameters is
+        refreshed every tRefreshDelay; the subset in stAxisParametersExposed is
+        copied out for EPICS each cycle.
+
+    Objectives:
+        - Every MC_ReadParameterSet request is bounded by tReadTimeout. A read
+          the NC never answers is counted as failed, bExecute is dropped so the
+          refresh retries, and a latched fault with an explicit message is
+          raised on stMotionStage. The fault clears only through
+          stMotionStage.bReset.
+
+    History:
+        2026-11-28, taio-generic-0: bound the NC parameter read with a timeout
+            watchdog and raise a latched fault with an explicit message on
+            expiry instead of retrying a hung request forever.
 *)
 VAR_IN_OUT
     stMotionStage: ST_MotionStage;
 END_VAR
 VAR_INPUT
+    // TRUE to read and refresh the axis parameters.
     bEnable: BOOL;
+    // Delay between the end of one read and the start of the next.
     tRefreshDelay: TIME;
+    // Maximum time a single MC_ReadParameterSet request may stay outstanding
+    // before it is counted as failed and the read is retried.
+    tReadTimeout: TIME := T#2S;
 END_VAR
 VAR_OUTPUT
+    // TRUE while MC_ReadParameterSet reports an error.
     bError: BOOL;
+    // TRUE for the cycle a read request is counted as failed (timed out).
+    bTimeout: BOOL;
+    // Number of read requests counted as failed. Cumulative, diagnostic only.
+    nReadFailures: UINT;
 END_VAR
 VAR
+    // NC parameter set reader.
     mcReadParams: MC_ReadParameterSet;
+    // Refresh delay between reads.
     timer: TON;
     bExecute: BOOL := TRUE;
+    // Watchdog on a single outstanding read request.
+    tonReadTimeout: TON;
     nLatchErrId: UDINT;
 END_VAR
 ]]></Declaration>
@@ -32,6 +63,26 @@ mcReadParams(
     Axis:=stMotionStage.Axis,
     Execute:=bEnable AND bExecute,
     Error=>bError);
+
+// Watchdog on the outstanding read: the NC must answer with Done or Error
+// within tReadTimeout. Without it a read the NC never completes latches
+// bExecute, is retried forever, and leaves stale axis parameters in place
+// with bError FALSE and no diagnostic.
+tonReadTimeout(
+    IN:=bEnable AND bExecute AND NOT mcReadParams.Done AND NOT mcReadParams.Error,
+    PT:=tReadTimeout);
+
+bTimeout := tonReadTimeout.Q;
+IF bTimeout THEN
+    // Count the request as failed and drop bExecute so the refresh retries:
+    // the outstanding request is aborted by the next call.
+    nReadFailures := nReadFailures + 1;
+    bExecute := FALSE;
+    // Latched fault: cleared only by a stMotionStage.bReset.
+    stMotionStage.bError S= TRUE;
+    stMotionStage.nErrorId := E_LCLSMotionError.NC_PARAM_TIMEOUT;
+    stMotionStage.sCustomErrorMessage := 'NC parameter read timed out';
+END_IF
 
 // Copy axis parameters that we want to expose to the EPICS layer.
 stMotionStage.stAxisParametersExposed.bCtrlEnablePosDiffControl     := stMotionStage.stAxisParameters.bCtrlEnablePosDiffControl;
