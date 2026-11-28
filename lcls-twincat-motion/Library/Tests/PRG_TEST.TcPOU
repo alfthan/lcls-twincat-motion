@@ -16,6 +16,7 @@ VAR
     fb_PositionStateMove_Test: FB_PositionStateMove_Test;
     fb_PositionStateMoveND_Test: FB_PositionStateMoveND_Test;
     fb_PositionStateND_Test: FB_PositionStateND_Test;
+    fb_EncErrorFFO_Test: FB_EncErrorFFO_Test;
     fb_NCErrorFFO_Test: FB_NCErrorFFO_Test;
     fb_StatePMPSEnables_Test: FB_StatePMPSEnables_Test;
     fb_PerMotorFFOND_Test: FB_PerMotorFFOND_Test;

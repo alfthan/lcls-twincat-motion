@@ -1,0 +1,223 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="FB_EncErrorFFO_Test" Id="{551b47c2-b661-40c7-9c5b-6365332ba2aa}" SpecialFunc="None">
+    <Declaration><![CDATA[FUNCTION_BLOCK FB_EncErrorFFO_Test EXTENDS TcUnit.FB_TestSuite
+(*
+    Unit tests for FB_EncErrorFFO.
+
+    FB_EncErrorFFO is an FB_NCErrorFFO configured for the encoder error
+    range (16#4400 - 16#44FF). This suite exercises FB_EncErrorFFO only,
+    with no other fast fault block in the same test POU, so that a failure
+    here is attributable to FB_EncErrorFFO alone.
+
+    Objectives:
+    - A drive error (16#4550) outside the encoder error range must not
+      trip FB_EncErrorFFO and must leave the fast fault output OK
+    - An encoder error (16#4467) must trip FB_EncErrorFFO and the fast
+      fault output
+
+    Usage: instantiate in PRG_TEST. Requires the NC test axis that
+    FB_CauseNCError writes into, the same setup as FB_NCErrorFFO_Test.
+
+    History:
+    - 2026-11-28: split out of FB_NCErrorFFO_Test so that FB_EncErrorFFO
+      has a dedicated test POU
+*)
+VAR
+    // Motion stage under test, fed by the test NC axis
+    stMotionStage: ST_MotionStage;
+    // Motion stage behavior block, needed to propagate axis errors
+    fbMotionStage: FB_MotionStage;
+    // Fast fault output that the block under test trips
+    fbFFHWO: FB_HardwareFFOutput := (bAutoReset := TRUE);
+    // Test helper that injects a real NC error
+    fbCauseNCError: FB_CauseNCError;
+
+    // Block under test
+    fbEncErrorFFO: FB_EncErrorFFO;
+
+    // Index of the test in this suite that is currently running
+    nTestCounter: UINT;
+    // Set by a test when it has completed
+    bOneTestDone: BOOL;
+    // Times out any test that stalls
+    tonTimer: TON;
+END_VAR
+]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[
+fbMotionStage(stMotionStage:=stMotionStage);
+fbEncErrorFFO(
+    stMotionStage:=stMotionStage,
+    fbFFHWO:=fbFFHWO,
+    bAutoReset:=TRUE,
+);
+// Fast fault output is TRUE when there are no issues and FALSE when there is an issue
+fbFFHWO.EvaluateOutput();
+
+// Run one test at a time: the stage state carries over between tests
+TestDriveError(0);
+TestEncoderError(1);
+
+IF bOneTestDone THEN
+    bOneTestDone := FALSE;
+    nTestCounter := nTestCounter + 1;
+    tonTimer(IN:=FALSE);
+    fbCauseNCError(
+        Axis:=stMotionStage.Axis,
+        bExecute:=FALSE,
+    );
+    stMotionStage.bReset := TRUE;
+    fbMotionStage(stMotionStage:=stMotionStage);
+END_IF
+// Use this timer to time out any tests that stall
+tonTimer(
+    IN:=TRUE,
+    PT:=T#5s,
+);]]></ST>
+    </Implementation>
+    <Method Name="TestDriveError" Id="{c398f6b1-6fe3-42ff-a432-532e2764f3c5}">
+      <Declaration><![CDATA[METHOD TestDriveError
+(*
+    Objective: a drive error outside the encoder error range must not
+    trip FB_EncErrorFFO, even though the NC error is present.
+*)
+VAR_INPUT
+    // Index of this test in the suite
+    nTestID: UINT;
+END_VAR
+VAR_INST
+    // Test sequence state
+    nState: UINT;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[
+TEST('TestDriveErrorDoesNotTrip');
+IF nTestCounter <> nTestID THEN
+    RETURN;
+END_IF
+
+CASE nState OF
+    0:
+        // First cycle: no error, no fault
+        AssertFalse(
+            stMotionStage.bError,
+            'Should have had no error before running this test',
+        );
+        AssertTrue(
+            fbFFHWO.q_xFastFaultOut,
+            'Should have had no fault with no error',
+        );
+        nState := 1;
+    1:
+        // Next time: cause a drive error, outside the encoder error range
+        fbCauseNCError(
+            Axis:=stMotionStage.Axis,
+            bExecute:=TRUE,
+            nErrorCode:=16#4550, // Position lag monitoring error code
+        );
+END_CASE
+
+// Wait for the NC error or the timeout, then check everything:
+// an encoder block must ignore a non-encoder error
+IF tonTimer.Q OR (stMotionStage.bError AND stMotionStage.nErrorId = 16#4550) THEN
+    AssertFalse(
+        tonTimer.Q,
+        'Timeout in test',
+    );
+    AssertTrue(
+        stMotionStage.bError,
+        'Did not get motor error in error test',
+    );
+    AssertEquals_UDINT(
+        Expected:=16#4550,
+        Actual:=stMotionStage.nErrorId,
+        Message:='Error causer is broken',
+    );
+    AssertTrue(
+        fbFFHWO.q_xFastFaultOut,
+        Message:='Enc error FB tripped the fast fault on a drive error',
+    );
+    AssertFalse(
+        fbEncErrorFFO.bTripped,
+        Message:='Enc error FB tripped with a drive error',
+    );
+    bOneTestDone := TRUE;
+    nState := 0;
+    TEST_FINISHED();
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="TestEncoderError" Id="{bf37354b-196c-4930-a743-ca6eabe0f6bd}">
+      <Declaration><![CDATA[METHOD TestEncoderError
+(*
+    Objective: an encoder error must trip FB_EncErrorFFO and the fast
+    fault output.
+*)
+VAR_INPUT
+    // Index of this test in the suite
+    nTestID: UINT;
+END_VAR
+VAR_INST
+    // Test sequence state
+    nState: UINT;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[
+TEST('TestEncErrorTrips');
+IF nTestCounter <> nTestID THEN
+    RETURN;
+END_IF
+
+CASE nState OF
+    0:
+        // First cycle: no error, no fault
+        AssertFalse(
+            stMotionStage.bError,
+            'Should have had no error before running this test',
+        );
+        AssertTrue(
+            fbFFHWO.q_xFastFaultOut,
+            'Should have had no fault with no error',
+        );
+        nState := 1;
+    1:
+        // Next time: cause an encoder error
+        fbCauseNCError(
+            Axis:=stMotionStage.Axis,
+            bExecute:=TRUE,
+            nErrorCode:=16#4467, // Invalid encoder position data
+        );
+END_CASE
+
+// Wait for the fault or the timeout, then check everything
+IF tonTimer.Q OR (NOT fbFFHWO.q_xFastFaultOut AND stMotionStage.nErrorID = 16#4467) THEN
+    AssertFalse(
+        tonTimer.Q,
+        'Timeout in test',
+    );
+    AssertTrue(
+        stMotionStage.bError,
+        'Did not get motor error in error test',
+    );
+    AssertEquals_UDINT(
+        Expected:=16#4467,
+        Actual:=stMotionStage.nErrorId,
+        Message:='Error causer is broken',
+    );
+    AssertFalse(
+        fbFFHWO.q_xFastFaultOut,
+        Message:='Did not cause a fast fault',
+    );
+    AssertTrue(
+        fbEncErrorFFO.bTripped,
+        Message:='Enc error FB did not trip with an enc error',
+    );
+    bOneTestDone := TRUE;
+    nState := 0;
+    TEST_FINISHED();
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+  </POU>
+</TcPlcObject>

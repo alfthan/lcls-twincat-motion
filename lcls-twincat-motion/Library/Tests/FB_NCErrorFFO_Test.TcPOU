@@ -3,12 +3,22 @@
   <POU Name="FB_NCErrorFFO_Test" Id="{a14def3e-cd38-464e-aab5-e8acc073b3c5}" SpecialFunc="None">
     <Declaration><![CDATA[FUNCTION_BLOCK FB_NCErrorFFO_Test EXTENDS TcUnit.FB_TestSuite
 (*
-    Test the following related FBs:
-    - FB_NCErrorFFO
-    - FB_EncErrorFFO
+    Unit tests for FB_NCErrorFFO.
 
-    These function blocks are designed to trip the beam when there
-    is an NC error reported by stMotionStage.
+    FB_NCErrorFFO is designed to trip the beam when there is an NC error
+    reported by stMotionStage. This suite exercises FB_NCErrorFFO only:
+    FB_EncErrorFFO has its own dedicated suite, FB_EncErrorFFO_Test.
+
+    Objectives:
+    - A drive error (16#4550) inside the configured error range must trip
+      FB_NCErrorFFO and the fast fault output
+
+    Usage: instantiate in PRG_TEST. Requires the NC test axis that
+    FB_CauseNCError writes into.
+
+    History:
+    - 2026-11-28: FB_EncErrorFFO removed from this suite; it is now
+      covered by FB_EncErrorFFO_Test
 *)
 VAR
     stMotionStage: ST_MotionStage;
@@ -17,7 +27,6 @@ VAR
     fbCauseNCError: FB_CauseNCError;
 
     fbNCErrorFFO: FB_NCErrorFFO;
-    fbEncErrorFFO: FB_EncErrorFFO;
 
     nTestCounter: UINT;
     bOneTestDone: BOOL;
@@ -27,7 +36,7 @@ END_VAR
     <Implementation>
       <ST><![CDATA[
 fbMotionStage(stMotionStage:=stMotionStage);
-// Limit to drive errors so I can isolate it from the enc error
+// Limit to drive errors (16#45XX) so this suite only reacts to drive errors
 fbNCErrorFFO(
     stMotionStage:=stMotionStage,
     fbFFHWO:=fbFFHWO,
@@ -35,16 +44,10 @@ fbNCErrorFFO(
     nLowErrorId:=16#4500,
     nHighErrorId:=16#45FF,
 );
-fbEncErrorFFO(
-    stMotionStage:=stMotionStage,
-    fbFFHWO:=fbFFHWO,
-    bAutoReset:=TRUE,
-);
 // Fast fault output is TRUE when there are no issues and FALSE when there is an issue
 fbFFHWO.EvaluateOutput();
 
 TestNC(0);
-TestEnc(1);
 
 IF bOneTestDone THEN
     bOneTestDone := FALSE;
@@ -63,76 +66,6 @@ tonTimer(
     PT:=T#5s,
 );]]></ST>
     </Implementation>
-    <Method Name="TestEnc" Id="{a1e8e2ae-676f-484a-ab92-162f96da52ce}">
-      <Declaration><![CDATA[METHOD TestEnc
-VAR_INPUT
-    nTestID: UINT;
-END_VAR
-VAR_INST
-    nState: UINT;
-END_VAR]]></Declaration>
-      <Implementation>
-        <ST><![CDATA[
-TEST('TestEncError');
-IF nTestCounter <> nTestID THEN
-    RETURN;
-END_IF
-
-CASE nState OF
-    0:
-        // First cycle: no error, no fault
-        AssertFalse(
-            stMotionStage.bError,
-            'Should have had no error before running this test',
-        );
-        AssertTrue(
-            fbFFHWO.q_xFastFaultOut,
-            'Should have had no fault with no error',
-        );
-        nState := 1;
-    1:
-        // Next time: cause an error
-        fbCauseNCError(
-            Axis:=stMotionStage.Axis,
-            bExecute:=TRUE,
-            nErrorCode:=16#4467, // Invalid encoder position data
-        );
-END_CASE
-
-// Wait for the fault or the timeout, then check everything
-IF tonTimer.Q OR (NOT fbFFHWO.q_xFastFaultOut AND stMotionStage.nErrorID = 16#4467) THEN
-    AssertFalse(
-        tonTimer.Q,
-        'Timeout in test',
-    );
-    AssertTrue(
-        stMotionStage.bError,
-        'Did not get motor error in error test',
-    );
-    AssertEquals_UDINT(
-        Expected:=16#4467,
-        Actual:=stMotionStage.nErrorId,
-        Message:='Error causer is broken',
-    );
-    AssertFalse(
-        fbFFHWO.q_xFastFaultOut,
-        Message:='Did not cause a fast fault',
-    );
-    AssertFalse(
-        fbNCErrorFFO.bTripped,
-        Message:='Drive error FB tripped with an enc error',
-    );
-    AssertTrue(
-        fbEncErrorFFO.bTripped,
-        Message:='Enc error fb did not trip with an enc error',
-    );
-    bOneTestDone := TRUE;
-    nState := 0;
-    TEST_FINISHED();
-END_IF
-]]></ST>
-      </Implementation>
-    </Method>
     <Method Name="TestNC" Id="{c5dfb7df-a894-4064-9668-ebc3e9b9e3a0}">
       <Declaration><![CDATA[METHOD TestNC
 VAR_INPUT
@@ -192,10 +125,6 @@ IF tonTimer.Q OR (NOT fbFFHWO.q_xFastFaultOut AND stMotionStage.nErrorId = 16#45
     AssertTrue(
         fbNCErrorFFO.bTripped,
         Message:='NC error FB did not trip with a drive error',
-    );
-    AssertFalse(
-        fbEncErrorFFO.bTripped,
-        Message:='Enc error tripped with a drive error',
     );
     bOneTestDone := TRUE;
     TEST_FINISHED();
