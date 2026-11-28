@@ -6,12 +6,13 @@
 {attribute 'to_string'}
 TYPE E_StartupState :
 (
-    STARTUP_IDLE:=0,
-    STARTUP_CLEAR,
-    STARTUP_RESET_FAULT,
-    STARTUP_SHUTDOWN,
-    STARTUP_SWITCH_ON,
-    STARTUP_ENABLE_OP
+    STARTUP_IDLE:=0,        // not running the DS402 boot sequence
+    STARTUP_CLEAR,          // clear the controlword
+    STARTUP_RESET_FAULT,    // controlword fault reset (bit 7)
+    STARTUP_SHUTDOWN,       // controlword shutdown
+    STARTUP_SWITCH_ON,      // controlword switch on
+    STARTUP_ENABLE_OP,      // controlword enable operation
+    STARTUP_WAIT_OPERATIONAL // wait until the drive reports operational
 );
 END_TYPE
 ]]></Declaration>

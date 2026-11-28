@@ -2,11 +2,12 @@
 <TcPlcObject Version="1.1.0.1">
   <POU Name="FB_MCS2DriveManager_Test" Id="{c2f1a8d4-6e3b-4a90-9f12-7b5c0d4e2a31}" SpecialFunc="None">
     <Declaration><![CDATA[(*
-    Unit tests for FB_MCS2DriveManager operating-mode selection.
+    Unit tests for FB_MCS2DriveManager operating-mode selection and DS402 startup.
     Verifies that the eOpModeReq PV is the single source of truth for the DS402
     operating mode: a PV change switches the drive on demand, and a motion request
     writes the mode its action needs into the PV (so the readback stays consistent),
-    with closed-loop (CSP) as the default.
+    with closed-loop (CSP) as the default. Also verifies that each DS402 startup
+    step writes its named controlword from DS402_GVL.
 *)
 FUNCTION_BLOCK FB_MCS2DriveManager_Test EXTENDS TcUnit.FB_TestSuite
 VAR
@@ -18,6 +19,7 @@ TestPvRequestSwitchesToCalibration();
 TestStepCmdSelectsStepMode();
 TestMoveCmdSelectsClosedLoop();
 TestDefaultIsClosedLoop();
+TestStartupSequenceControlWords();
 ]]></ST>
     </Implementation>
     <Method Name="TestDefaultIsClosedLoop" Id="{a1111111-0000-4000-8000-000000000001}">
@@ -186,6 +188,85 @@ fbSut(
 // The step request writes STEP into the PV and switches the drive into step mode.
 AssertTrue(stChan.eOpModeReq = E_MCS2OpModeReq.STEP, 'Step request should select STEP in the PV');
 AssertTrue(stDrive.nModeOfOperation = E_MCS2OpMode.STEP, 'Step request should switch drive to MCS2_OL_STEP_MODE');
+
+TEST_FINISHED();
+]]></ST>
+      </Implementation>
+    </Method>
+
+    <Method Name="TestStartupSequenceControlWords" Id="{a1111111-0000-4000-8000-000000000006}">
+      <Declaration><![CDATA[METHOD PRIVATE TestStartupSequenceControlWords
+VAR_INST
+    fbSut : FB_MCS2DriveManager;
+    stMotionStage : ST_MotionStage;
+    stChan : ST_MCS2ChanParameter;
+    stDrive : ST_DS402Drive;
+END_VAR
+]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[TEST(__POUNAME());
+
+// Hardware enabled and the drive sitting in a manual (non-CSP) mode, so the
+// DS402 startup sequence owns the controlword. Each step writes its controlword
+// before the step timer is evaluated, so entering the step explicitly is enough
+// and the assertion holds whatever the timer does within this test cycle.
+stChan.bEnableHardwareOps := TRUE;
+stDrive.nModeOfOperationDisplay := E_MCS2OpMode.STEP;
+
+fbSut.eStartupState := E_StartupState.STARTUP_CLEAR;
+fbSut(
+    bUserExec := FALSE,
+    bStartupActive := TRUE,
+    stMotionStage := stMotionStage,
+    stMCS2ChanParameter := stChan,
+    stDS402Drive := stDrive
+);
+AssertTrue(stDrive.nDriveControl = DS402_GVL.K_DS402_CTRL_DISABLE_VOLTAGE,
+           'Startup CLEAR must write the disabled controlword');
+
+fbSut.eStartupState := E_StartupState.STARTUP_RESET_FAULT;
+fbSut(
+    bUserExec := FALSE,
+    bStartupActive := TRUE,
+    stMotionStage := stMotionStage,
+    stMCS2ChanParameter := stChan,
+    stDS402Drive := stDrive
+);
+AssertTrue(stDrive.nDriveControl = DS402_GVL.K_DS402_CTRL_FAULT_RESET,
+           'Startup RESET_FAULT must write the fault reset controlword');
+
+fbSut.eStartupState := E_StartupState.STARTUP_SHUTDOWN;
+fbSut(
+    bUserExec := FALSE,
+    bStartupActive := TRUE,
+    stMotionStage := stMotionStage,
+    stMCS2ChanParameter := stChan,
+    stDS402Drive := stDrive
+);
+AssertTrue(stDrive.nDriveControl = DS402_GVL.K_DS402_CTRL_SHUTDOWN,
+           'Startup SHUTDOWN must write the shutdown controlword');
+
+fbSut.eStartupState := E_StartupState.STARTUP_SWITCH_ON;
+fbSut(
+    bUserExec := FALSE,
+    bStartupActive := TRUE,
+    stMotionStage := stMotionStage,
+    stMCS2ChanParameter := stChan,
+    stDS402Drive := stDrive
+);
+AssertTrue(stDrive.nDriveControl = DS402_GVL.K_DS402_CTRL_SWITCH_ON,
+           'Startup SWITCH_ON must write the switch on controlword');
+
+fbSut.eStartupState := E_StartupState.STARTUP_ENABLE_OP;
+fbSut(
+    bUserExec := FALSE,
+    bStartupActive := TRUE,
+    stMotionStage := stMotionStage,
+    stMCS2ChanParameter := stChan,
+    stDS402Drive := stDrive
+);
+AssertTrue(stDrive.nDriveControl = DS402_GVL.K_DS402_CTRL_ENABLE_OP,
+           'Startup ENABLE_OP must write the enable operation controlword');
 
 TEST_FINISHED();
 ]]></ST>

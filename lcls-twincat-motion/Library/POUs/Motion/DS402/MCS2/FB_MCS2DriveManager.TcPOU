@@ -28,7 +28,8 @@ END_VAR
 
 VAR
 
-    eStartupState : INT := 0;
+    // Current step of the DS402 startup sequence (see E_StartupState)
+    eStartupState : E_StartupState := E_StartupState.STARTUP_CLEAR;
     tonStartupStep : TON;
     bFaultLast : BOOL := FALSE;
     ftFaultClear : F_TRIG;
@@ -95,48 +96,48 @@ END_IF
 // DS402 startup sequence at boot or after fault (until operational)
 IF bStartupActive AND bDS402Manual THEN
     CASE eStartupState OF
-        0: // CLEAR CONTROL WORD
-            stDS402Drive.nDriveControl := 0;
+        E_StartupState.STARTUP_IDLE, E_StartupState.STARTUP_CLEAR: // CLEAR CONTROL WORD
+            stDS402Drive.nDriveControl := DS402_GVL.K_DS402_CTRL_DISABLE_VOLTAGE;
             tonStartupStep(IN := TRUE);
             IF tonStartupStep.Q THEN
                 tonStartupStep(IN := FALSE);
-                eStartupState := 1;
+                eStartupState := E_StartupState.STARTUP_RESET_FAULT;
             END_IF
-        1: // RESET FAULT
-            stDS402Drive.nDriveControl := 16#80;
+        E_StartupState.STARTUP_RESET_FAULT: // RESET FAULT
+            stDS402Drive.nDriveControl := DS402_GVL.K_DS402_CTRL_FAULT_RESET;
             tonStartupStep(IN := TRUE);
             IF tonStartupStep.Q THEN
                 tonStartupStep(IN := FALSE);
-                eStartupState := 2;
+                eStartupState := E_StartupState.STARTUP_SHUTDOWN;
             END_IF
-        2: // SHUTDOWN
-            stDS402Drive.nDriveControl := 6;
+        E_StartupState.STARTUP_SHUTDOWN: // SHUTDOWN
+            stDS402Drive.nDriveControl := DS402_GVL.K_DS402_CTRL_SHUTDOWN;
             tonStartupStep(IN := TRUE);
             IF tonStartupStep.Q THEN
                 tonStartupStep(IN := FALSE);
-                eStartupState := 3;
+                eStartupState := E_StartupState.STARTUP_SWITCH_ON;
             END_IF
-        3: // SWITCH ON
-            stDS402Drive.nDriveControl := 7;
+        E_StartupState.STARTUP_SWITCH_ON: // SWITCH ON
+            stDS402Drive.nDriveControl := DS402_GVL.K_DS402_CTRL_SWITCH_ON;
             tonStartupStep(IN := TRUE);
             IF tonStartupStep.Q THEN
                 tonStartupStep(IN := FALSE);
-                eStartupState := 4;
+                eStartupState := E_StartupState.STARTUP_ENABLE_OP;
             END_IF
-        4: // ENABLE OPERATION
-            stDS402Drive.nDriveControl := 15;
+        E_StartupState.STARTUP_ENABLE_OP: // ENABLE OPERATION
+            stDS402Drive.nDriveControl := DS402_GVL.K_DS402_CTRL_ENABLE_OP;
             tonStartupStep(IN := TRUE);
             IF tonStartupStep.Q THEN
                 tonStartupStep(IN := FALSE);
-                eStartupState := 5;
+                eStartupState := E_StartupState.STARTUP_WAIT_OPERATIONAL;
             END_IF
-        5: // WAIT FOR OPERATIONAL
+        E_StartupState.STARTUP_WAIT_OPERATIONAL: // WAIT FOR OPERATIONAL
             IF bOperational THEN
-                eStartupState := 0;
+                eStartupState := E_StartupState.STARTUP_CLEAR;
                 bStartupActive := FALSE;
             END_IF
         ELSE
-            eStartupState := 0;
+            eStartupState := E_StartupState.STARTUP_CLEAR;
     END_CASE
 ELSE
     // regular operation/control logic (only when startup is finished and drive is operational)
@@ -203,7 +204,7 @@ ELSE
             ELSE
                 // Already in requested mode but NOT operational: (re-)trigger DS402 startup sequence!
                 bStartupActive := TRUE;
-                eStartupState := 0; // Start DS402 boot up
+                eStartupState := E_StartupState.STARTUP_CLEAR; // Start DS402 boot up
                 bPendingManualModeSwitch := FALSE;
                 bManualTransition := FALSE;
             END_IF
@@ -212,7 +213,9 @@ ELSE
                 stDS402Drive.nModeOfOperation := E_MCS2OpMode.CSP;
                 bPendingManualModeSwitch := FALSE;
             ELSE
-                stDS402Drive.nDriveControl.4 := FALSE;
+                // drop the new set-point bit before changing the mode
+                stDS402Drive.nDriveControl := stDS402Drive.nDriveControl
+                                               AND NOT DS402_GVL.K_DS402_CTRL_MASK_NEW_SETPOINT;
                 stDS402Drive.nModeOfOperation := eRequestedManualMode;
                 bPendingManualModeSwitch := TRUE;
             END_IF
@@ -229,7 +232,7 @@ ELSE
             ELSE
                 // correct mode, BUT NOT operational: initiate DS402 startup boot sequence
                 bStartupActive := TRUE;
-                eStartupState := 0;
+                eStartupState := E_StartupState.STARTUP_CLEAR;
                 bPendingManualModeSwitch := FALSE;
             END_IF
         END_IF
@@ -237,7 +240,7 @@ ELSE
 
 END_IF
 
-tonStartupStep( PT := T#80MS);]]></ST>
+tonStartupStep( PT := DS402_GVL.K_MCS2_STARTUP_STEP_TIME);]]></ST>
     </Implementation>
   </POU>
 </TcPlcObject>

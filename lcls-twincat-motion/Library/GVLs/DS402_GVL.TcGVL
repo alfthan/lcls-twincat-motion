@@ -1,0 +1,56 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <GVL Name="DS402_GVL" Id="{0A531F21-2990-4804-A560-E07D3B824CA6}">
+    <Declaration><![CDATA[{attribute 'qualified_only'}
+(*
+    DS402_GVL
+    Named constants for the MCS2 / DS402 (CiA 402) drive interface.
+
+    Purpose:
+        Give the protocol controlword commands, the controlword bit masks, the
+        DS402 startup-step dwell time and the MCS2 step settling time a single
+        named home, so that a drive variant, a protocol revision or a tuning
+        change is made here instead of editing scattered literals in the MCS2
+        drive-control blocks.
+
+    Usage:
+        DS402_GVL.K_DS402_CTRL_ENABLE_OP          // whole controlword
+        DS402_GVL.K_DS402_CTRL_MASK_NEW_SETPOINT  // single controlword bit
+        DS402_GVL.K_MCS2_STEP_SETTLE_TIME         // settling time
+
+    Objectives:
+        - No bare controlword, bit-position or timing literal in the MCS2
+          drive-control POUs.
+        - Every value named after its CiA 402 meaning, never its number.
+
+    History:
+        2026-11-28 ai-agent (task 521): initial declaration; replaces the
+        literals previously used in FB_MCS2DriveManager and FB_MCS2StepMode
+        (audit findings 1087 and 1097).
+*)
+VAR_GLOBAL CONSTANT
+    (*
+        CiA 402 controlword commands (controlword of the DS402 state machine),
+        written whole into ST_DS402Drive.nDriveControl.
+    *)
+    K_DS402_CTRL_DISABLE_VOLTAGE : UINT := 16#0000; // 0: all command bits clear
+    K_DS402_CTRL_SHUTDOWN        : UINT := 16#0006; // 6: shutdown
+    K_DS402_CTRL_SWITCH_ON       : UINT := 16#0007; // 7: switch on
+    K_DS402_CTRL_ENABLE_OP       : UINT := 16#000F; // 15: enable operation
+    K_DS402_CTRL_FAULT_RESET     : UINT := 16#0080; // 128: fault reset (bit 7)
+
+    (*
+        CiA 402 controlword bit masks, to set or clear one bit of
+        ST_DS402Drive.nDriveControl without a bare bit-position literal.
+    *)
+    K_DS402_CTRL_MASK_ENABLE_OP    : UINT := 16#0008; // bit 3: enable operation
+    K_DS402_CTRL_MASK_NEW_SETPOINT : UINT := 16#0010; // bit 4: new set-point
+
+    (*
+        Timing values, hardware and tuning dependent.
+    *)
+    K_MCS2_STARTUP_STEP_TIME : TIME := T#80MS; // dwell per DS402 startup step
+    K_MCS2_STEP_SETTLE_TIME  : TIME := T#80MS; // settle time before a step move accepts TargetReached
+END_VAR]]></Declaration>
+  </GVL>
+</TcPlcObject>

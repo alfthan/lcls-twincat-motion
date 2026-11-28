@@ -39,7 +39,9 @@ CASE eStepState OF
             bStepMoveDone := FALSE;
             bStepMoveAborted := FALSE;
             tonSettlingTime.IN:=FALSE;
-            stDS402Drive.nDriveControl.3 := TRUE;
+            // enable operation: raise controlword bit 3
+            stDS402Drive.nDriveControl := stDS402Drive.nDriveControl
+                                          OR DS402_GVL.K_DS402_CTRL_MASK_ENABLE_OP;
             eStepState := E_MoveState.INIT;
         END_IF
 
@@ -47,7 +49,9 @@ CASE eStepState OF
         IF stMotionStage.bError THEN
             eStepState := E_MoveState.ERROR;
         ELSE
-            stDS402Drive.nDriveControl.4 := TRUE;
+            // new set-point: raise controlword bit 4 to start the step move
+            stDS402Drive.nDriveControl := stDS402Drive.nDriveControl
+                                          OR DS402_GVL.K_DS402_CTRL_MASK_NEW_SETPOINT;
             tonSettlingTime.IN:=TRUE;
             eStepState := E_MoveState.IN_PROGRESS;
         END_IF
@@ -66,14 +70,18 @@ CASE eStepState OF
         END_IF
 
     E_MoveState.INTERRUPTED:
-        stDS402Drive.nDriveControl.4 := FALSE;
+        // new set-point: drop controlword bit 4
+        stDS402Drive.nDriveControl := stDS402Drive.nDriveControl
+                                      AND NOT DS402_GVL.K_DS402_CTRL_MASK_NEW_SETPOINT;
         bStepMoveBusy := FALSE;
         eStepState := E_MoveState.IDLING;
 
     E_MoveState.REACHED:
         bStepMoveBusy := FALSE;
         bStepMoveDone := TRUE;
-        stDS402Drive.nDriveControl.4 := FALSE;
+        // new set-point: drop controlword bit 4
+        stDS402Drive.nDriveControl := stDS402Drive.nDriveControl
+                                      AND NOT DS402_GVL.K_DS402_CTRL_MASK_NEW_SETPOINT;
         eStepState := E_MoveState.DONE;
 
     E_MoveState.DONE:
@@ -88,7 +96,7 @@ CASE eStepState OF
             eStepState := E_MoveState.IDLING;
         END_IF
 END_CASE
-tonSettlingTime(PT:=T#80MS);
+tonSettlingTime(PT := DS402_GVL.K_MCS2_STEP_SETTLE_TIME);
 bHalt := FALSE;
 bReset := FALSE;]]></ST>
     </Implementation>
