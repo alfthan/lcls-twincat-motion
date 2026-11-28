@@ -1,37 +1,156 @@
 ﻿<?xml version="1.0" encoding="utf-8"?>
 <TcPlcObject Version="1.1.0.1">
   <POU Name="FB_MCS2DriveManager" Id="{5c10b351-7387-4496-a10a-4c0c0cc328ab}" SpecialFunc="None">
-    <Declaration><![CDATA[FUNCTION_BLOCK FB_MCS2DriveManager
+    <Declaration><![CDATA[(*
+    FB_MCS2DriveManager - CiA402 (DS402) drive state and operating-mode
+    manager for one SmartAct MCS2 channel.
+
+    Purpose:
+        Owns the drive state of a single MCS2 channel. It decodes the DS402
+        status word into an operational/fault pair, runs the CiA402 switch-on /
+        enable-operation boot sequence, and maps the requested operating mode
+        onto the mode actually written to the drive. FB_MotionStageMCS2 owns one
+        instance per axis and gates all of its motion (CSP/NC, home, step,
+        calibrate) on the flags published here, so no other block needs to
+        decode the status word or drive the control word for mode selection.
+
+    Usage:
+        Call once per PLC cycle from the owning stage FB, after the DS402 TPDO
+        inputs have been refreshed and before the motion routines that consume
+        the output flags below.
+        - bUserExec is an edge, not a level: pass the rising edge of the
+          caller's execute, because it is also the only cycle on which this
+          block writes stMCS2ChanParameter.eOpModeReq.
+        - bStartupActive may be pulsed TRUE by the caller to force the DS402
+          boot sequence; the block also sets it itself when a fault clears.
+        - All three VAR_IN_OUT references must be valid, otherwise the block
+          returns without touching the drive.
+        - When stMCS2ChanParameter.bEnableHardwareOps is FALSE the block runs
+          as a simulation: bCSPModeEnabled is forced TRUE and no drive word is
+          written.
+
+    Objectives:
+        - Publish one unambiguous "drive is operational" flag and one
+          "drive is faulted" flag, so the motion routines never decode the
+          status word themselves.
+        - Clear, once per PLC start, the DS402 fault that the NC-wired axis
+          reports before it is operational, while leaving genuine run-time
+          faults to the operator reset path.
+        - Make a mode change atomic: request the mode, wait for the readback,
+          then raise bManualTransition so the motion layer knows it may command
+          again. Open-loop modes are only selected after enable operation has
+          been dropped.
+        - Space the boot-sequence control words with a per-step timer so the
+          drive sees each CiA402 command as a distinct step.
+
+    History:
+        2025-10-28  Yann Stephen Mandza  Split out of the DS402/MCS2 stage
+                                         logic as a standalone drive manager.
+        2026-03-04  Yann Stephen Mandza  Simulation mode via
+                                         bEnableHardwareOps.
+        2026-06-16  Yann Stephen Mandza  One-shot boot-time DS402 fault
+                                         auto-clear (bBootResetDone).
+        2026-11-28  Yann Stephen Mandza  Documentation: added this header and
+                                         an inline comment on every declaration.
+*)
+FUNCTION_BLOCK FB_MCS2DriveManager
 VAR_INPUT
-    // Rising trigger for manual/user request
+    // Rising edge of the caller's execute, i.e. TRUE for the single cycle in
+    // which a manual (EPICS) or motion request starts. On this edge the block
+    // re-writes stMCS2ChanParameter.eOpModeReq from the active command and
+    // re-evaluates the mode switch below.
     bUserExec : BOOL;
+    // Force the DS402 boot sequence from state 0. Pulsed TRUE by the caller to
+    // (re)start the drive, and set by this block itself after a fault clears;
+    // cleared by this block when the sequence produces an operational drive or
+    // when the drive faults.
     bStartupActive : BOOL;
 END_VAR
 
 VAR_IN_OUT
-    // Replace type with your actual axis structure
+    // Motion stage of the axis this channel drives. Supplies the NC axis id
+    // (non-zero means the axis is NC-wired and may be reset through bReset)
+    // and the bHomeCmd/bMoveCmd flags that select the operating mode.
     stMotionStage : ST_MotionStage;
-    stMCS2ChanParameter	: ST_MCS2ChanParameter;
-    stDS402Drive	: ST_DS402Drive;
+    // Channel parameters of the MCS2 channel. Carries the requested operating
+    // mode (eOpModeReq, written by this block on a request edge), the
+    // step/calibration mode commands, and bEnableHardwareOps, which puts the
+    // block into simulation when FALSE.
+    stMCS2ChanParameter : ST_MCS2ChanParameter;
+    // Cyclic process data of the drive: status word in, control word and
+    // operating mode out. The only drive state this block reads and the only
+    // words it writes.
+    stDS402Drive : ST_DS402Drive;
 END_VAR
 VAR_OUTPUT
+    // TRUE while the DS402 status word shows the complete "operation enabled"
+    // pattern (ready to switch on, switched on, operation enabled, voltage
+    // enabled, quick stop not active, no fault, switch-on not disabled).
+    // Recomputed from the status word every cycle, after the reference and
+    // simulation early returns.
     bOperational : BOOL;
+    // TRUE while the DS402 status word fault bit is set. The drive latches it,
+    // not this block: it clears only when the drive accepts a fault-reset
+    // control word (16#80), i.e. from the boot sequence or the operator reset.
     bFault : BOOL;
+    // "The requested mode change has landed" notice for the motion layer. Set
+    // when a pending switch finds the drive readback equal to the requested
+    // mode while the drive is operational; cleared on the next re-evaluation
+    // that finds the drive already in the requested mode. It reports the
+    // switch event only - it does not mean the drive is in an open-loop mode
+    // (that is bDS402Manual below) and it is not the requested mode (that is
+    // eRequestedManualMode below).
     bManualTransition : BOOL;
+    // TRUE while the drive's actual operating-mode readback is anything other
+    // than CSP, i.e. the axis is running an open-loop/manual mode (HOME, STEP
+    // or CALIBRATE) and the TwinCAT NC is not driving it. Recomputed every
+    // cycle from the readback, so it reflects the drive, not the request.
     bDS402Manual : BOOL;
+    // The drive is operational and running the CSP (cyclic synchronous
+    // position, i.e. closed-loop NC) mode. Also forced TRUE in simulation
+    // (bEnableHardwareOps = FALSE). FB_MotionStageMCS2 enables NC motion on
+    // it. FALSE during the boot sequence and whenever the drive is not
+    // operational; mutually exclusive with the three flags below.
     bCSPModeEnabled : BOOL;
+    // The drive is operational and running the DS402 HOME (homing) mode.
     bHomeModeEnabled : BOOL;
+    // The drive is operational and running the MCS2 open-loop STEP mode.
     bStepModeEnabled : BOOL;
+    // The drive is operational and running the MCS2 CALIBRATE mode.
     bCalibrationModeEnabled : BOOL;
+    // The DS402 operating mode (E_MCS2OpMode) that the requested mode
+    // (stMCS2ChanParameter.eOpModeReq) maps to this cycle: STEP, HOME,
+    // CALIBRATE, or CSP for CLOSED_LOOP and any unexpected value. Despite its
+    // historical name it also carries CSP, so it is the requested mode rather
+    // than a "manual" indication - use bDS402Manual for that.
+    // FB_MotionStageMCS2 switches on this value to pick its motion routine.
     eRequestedManualMode : E_MCS2OpMode := E_MCS2OpMode.CSP;
 END_VAR
 
 VAR
 
+    // Current step of the DS402 boot sequence: 0 clear control word, 1 fault
+    // reset (16#80), 2 shutdown (6), 3 switch on (7), 4 enable operation (15),
+    // 5 wait for bOperational. Reset to 0 when the sequence starts or an
+    // unexpected value is seen; only acted on while bStartupActive is TRUE.
     eStartupState : INT := 0;
+    // Per-step delay for the boot sequence. Started with PT = T#80MS in every
+    // timed step so each control word above is applied for at least 80 ms
+    // before the next one is written.
     tonStartupStep : TON;
+    // bFault as sampled in the previous cycle, used to detect the
+    // fault-cleared edge that restarts the boot sequence.
     bFaultLast : BOOL := FALSE;
+    // Debug-only falling-edge detector, clocked with the fault-appearance
+    // pulse (NOT bFaultLast AND bFault). Its Q is not consumed: the
+    // fault-cleared edge that restarts the boot sequence is taken from
+    // bFaultLast directly below.
     ftFaultClear : F_TRIG;
+    // TRUE while an open-loop mode request has been issued but the drive
+    // readback does not show it yet. Set when the request differs from the
+    // readback and the target mode is not CSP; cleared once the readback
+    // matches (which then raises bManualTransition or restarts the boot
+    // sequence), or when CSP is requested.
     bPendingManualModeSwitch : BOOL := FALSE;
     // Previous PV value, used to detect a mode-request change
     eLastModeReq : E_MCS2OpModeReq := E_MCS2OpModeReq.CLOSED_LOOP;
