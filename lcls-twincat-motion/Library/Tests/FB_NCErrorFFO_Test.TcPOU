@@ -9,19 +9,48 @@
 
     These function blocks are designed to trip the beam when there
     is an NC error reported by stMotionStage.
+
+    The two tests take turns, separated by an explicit reset sequence:
+    when a test completes, the motion stage reset is pulsed for exactly
+    one scan and released again, and the next test may only start once
+    that reset has been acknowledged. See nResetState below.
 *)
 VAR
+    // The motion stage under test and the block that manages it
     stMotionStage: ST_MotionStage;
     fbMotionStage: FB_MotionStage;
+    // Fast fault output that both fast fault blocks below add their faults to
     fbFFHWO: FB_HardwareFFOutput := (bAutoReset := TRUE);
+    // Writes a real-looking NC error into the axis to trip the fast fault blocks
     fbCauseNCError: FB_CauseNCError;
 
+    // The fast fault blocks under test
     fbNCErrorFFO: FB_NCErrorFFO;
     fbEncErrorFFO: FB_EncErrorFFO;
 
+    // Which multi-cycle test is running: TestNC is 0, TestEnc is 1
     nTestCounter: UINT;
+    // A test sets this on the cycle it finishes, the reset sequence consumes it
     bOneTestDone: BOOL;
+    // FALSE while a reset is pending: the next test is not allowed to start
+    bReadyForNextTest: BOOL := TRUE;
+    // Inter-test reset sequence state, one of the RESET_ constants below
+    nResetState: UINT := 0;
+    // TRUE when the stage and the fast faults confirm that a reset is done
+    bResetAck: BOOL;
+    // Bounds the wait for a reset acknowledgement, so a stuck reset fails
+    tonResetTimeout: TON;
+    // Bounds each test so a stalled test fails instead of hanging
     tonTimer: TON;
+END_VAR
+// Inter-test reset sequence states for nResetState
+VAR CONSTANT
+    // Nothing to reset: the reset request is held low and tests may run
+    RESET_IDLE: UINT := 0;
+    // The reset was pulsed: hold the request low and wait for the acknowledgement
+    RESET_WAIT_ACK: UINT := 1;
+    // How long a test, or a reset acknowledgement, may take before it fails
+    tTimeout: TIME := T#5s;
 END_VAR
 ]]></Declaration>
     <Implementation>
@@ -46,21 +75,71 @@ fbFFHWO.EvaluateOutput();
 TestNC(0);
 TestEnc(1);
 
-IF bOneTestDone THEN
-    bOneTestDone := FALSE;
-    nTestCounter := nTestCounter + 1;
-    tonTimer(IN:=FALSE);
-    fbCauseNCError(
-        Axis:=stMotionStage.Axis,
-        bExecute:=FALSE,
-    );
-    stMotionStage.bReset := TRUE;
-    fbMotionStage(stMotionStage:=stMotionStage);
-END_IF
+// Inter-test reset sequence.
+// The reset only executes on a rising edge and stops on the falling edge, so a
+// completed test raises stMotionStage.bReset for exactly one scan and then this
+// sequence drops it again in its own code. The next test is held off until the
+// reset has been acknowledged, so the reset cannot clear or mask the next
+// induced NC error and the test suite cannot stall on a held reset.
+CASE nResetState OF
+    RESET_IDLE:
+        // Nothing to reset: keep the request low so that every test
+        // completion raises a fresh rising edge
+        stMotionStage.bReset := FALSE;
+        IF bOneTestDone THEN
+            bOneTestDone := FALSE;
+            nTestCounter := nTestCounter + 1;
+            // Hold off the next test until the reset is acknowledged
+            bReadyForNextTest := FALSE;
+            // Stop inducing the NC error (falling edge) before clearing it
+            fbCauseNCError(
+                Axis:=stMotionStage.Axis,
+                bExecute:=FALSE,
+            );
+            // The test wait is over, the reset wait starts
+            tonTimer(IN:=FALSE);
+            // Rising edge: fbMotionStage picks this up on the next scan
+            stMotionStage.bReset := TRUE;
+            nResetState := RESET_WAIT_ACK;
+        END_IF
+    RESET_WAIT_ACK:
+        // Falling edge: the pulse above lasted exactly one scan. Drop the
+        // request here instead of relying on the stage to clear the caller's
+        // flag, so the next test completion is always a new rising edge.
+        stMotionStage.bReset := FALSE;
+        tonResetTimeout(
+            IN:=TRUE,
+            PT:=tTimeout,
+        );
+        // The reset is acknowledged when the stage reports no error and neither
+        // fast fault block is tripping any more: what the next test asserts.
+        bResetAck := NOT stMotionStage.bError
+            AND stMotionStage.nErrorId = 0
+            AND NOT fbNCErrorFFO.bTripped
+            AND NOT fbEncErrorFFO.bTripped
+            AND fbFFHWO.q_xFastFaultOut;
+        IF bResetAck THEN
+            tonResetTimeout(IN:=FALSE);
+            tonTimer(IN:=FALSE);
+            bReadyForNextTest := TRUE;
+            nResetState := RESET_IDLE;
+        ELSIF tonResetTimeout.Q THEN
+            // A reset that never completes has to fail the suite, not stall it
+            AssertFalse(
+                tonResetTimeout.Q,
+                'Timeout waiting for the NC error reset to be acknowledged',
+            );
+            tonResetTimeout(IN:=FALSE);
+            // Let the remaining tests run so the failure is reported
+            bReadyForNextTest := TRUE;
+            nResetState := RESET_IDLE;
+        END_IF
+END_CASE
+
 // Use this timer to time out any tests that stall
 tonTimer(
     IN:=TRUE,
-    PT:=T#5s,
+    PT:=tTimeout,
 );]]></ST>
     </Implementation>
     <Method Name="TestEnc" Id="{a1e8e2ae-676f-484a-ab92-162f96da52ce}">
@@ -74,7 +153,8 @@ END_VAR]]></Declaration>
       <Implementation>
         <ST><![CDATA[
 TEST('TestEncError');
-IF nTestCounter <> nTestID THEN
+// Do not run until it is this test's turn and any inter-test reset is done
+IF nTestCounter <> nTestID OR NOT bReadyForNextTest THEN
     RETURN;
 END_IF
 
@@ -145,7 +225,8 @@ END_VAR
       <Implementation>
         <ST><![CDATA[
 TEST('TestNCError');
-IF nTestCounter <> nTestID THEN
+// Do not run until it is this test's turn and any inter-test reset is done
+IF nTestCounter <> nTestID OR NOT bReadyForNextTest THEN
     RETURN;
 END_IF
 
