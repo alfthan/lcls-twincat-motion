@@ -4,41 +4,183 @@
     <Declaration><![CDATA[{attribute 'obsolete' := 'Use FB_PositionStatePMPS1D instead'}
 FUNCTION_BLOCK FB_PositionStatePMPS EXTENDS FB_PositionStatePMPS_Base
 (*
-    Hooks up a position state to an arbiter and an FFO
-        Use BeamParameterTransitionManager to manage transition requests between states
-        Hook up to the inputs/outputs of the state function block
-        Raises FFO if beam parameters are worse than required for current state
+    Purpose: hook one motor's position states up to PMPS. The block keeps the
+    beam-parameter request of the current state asserted on the arbiter, has the
+    BeamParameterTransitionManager (bptm) authorize the swap to a new request
+    when a move is requested, holds the move until that swap is authorized, and
+    contributes the fast faults that drop the FFO when the machine beam is worse
+    than the current state can tolerate.
+
+    Usage:
+        Instantiate this block (as fbStatePMPS) next to an FB_MotionStage, or
+        leave it inside a subclass of itself or of FB_PositionStateBase_WithPMPS,
+        and wire the four things it needs:
+            fbArbiter  := the beamline FB_Arbiter
+            fbFFHWO    := the FB_HardwareFFOutput to fault
+            stPmpsDoc  := the parsed PMPS DB, normally PMPS_GVL.BP_jsonDoc
+            sPmpsDeviceName, sTransitionKey := this device's key and its
+                          "in transition" key in that DB
+        then call Exec() once per cycle, after stMotionStage and arrStates are
+        filled in. The block is non-blocking and takes several cycles to complete
+        a transition. stMotionStage, arrStates, setState, getState,
+        bRequestTransition, bArbiterEnabled, bMaintMode, bArbiterTimeout,
+        bMoveOnArbiterTimeout and fStateBoundaryDeadband are inherited from
+        FB_PositionStatePMPS_Base, which runs the state machine; see that POU.
+
+    Objectives:
+        - Assert the current state's beam request on the arbiter and change it
+          only through the bptm, so the beam is always inside either the current
+          or the requested state's envelope.
+        - Never let the motor move into a new state before the transition is
+          authorized, and time that wait out (tArbiterTimeout) instead of
+          hanging forever.
+        - Report one distinct, diagnosable fast fault per failure mode: beam
+          parameters out of range (16#1000), zero-rate state (16#1001), bptm
+          timeout while moving (16#1002), bptm error (16#1003), maintenance mode
+          (16#1004) and unknown position between moves (16#1005).
+        - Auto-reset only what is safe to auto-reset and latch the rest until an
+          operator acknowledges it.
+
+    Obsolete: superseded by FB_PositionStatePMPS1D (and the 2D/3D variants plus
+    the FB_PositionStatePMPSND_Core they share), which do the same job through
+    the state-core blocks, add position-limit checks, expose the state data as
+    structs and do not require the caller to subclass a state block. This POU and
+    FB_PositionStatePMPS_Base are kept only so existing projects still build.
+    They remain instantiable, so treat the interface below as fixed.
+
+    History / author:
+        2023-03-15  Z. Lentz, commit 2d9b519 - replaced by
+                    FB_PositionStatePMPS1D and kept for backwards compatibility.
+        2023-05-26  Z. Lentz, commit 946ab44 - obsolete attribute added so using
+                    the deprecated blocks raises a compiler warning.
+        2023-06-23  Z. Lentz, commit b3d3dfb - UINT state indices and in-out
+                    backwards compatibility.
+        2026-11-28  Scirix audit agent, task #460 - this header and the
+                    declaration comments below added. No logic changed.
 *)
 VAR_IN_OUT
+    // The beam-parameter arbiter this block asserts its requests on. Normally the
+    // beamline-wide FB_Arbiter; the bptm adds and removes this device's requests
+    // there, and the device name used for them is stMotionStage.sName (inherited).
     fbArbiter: FB_Arbiter;
+    // The hardware fast-fault output that every fault in HandleFFO contributes to.
+    // Normally the beamline-wide FB_HardwareFFOutput. It also receives the parse
+    // fault raised by fbReadPmpsDb (type 16#FF13) when the DB cannot be read.
     fbFFHWO: FB_HardwareFFOutput;
 END_VAR
 VAR_INPUT
+    // Reloads the PMPS parameters from stPmpsDoc on a rising edge. The block reads
+    // the state keys out of arrStates and the transition key into arrPMPS, then
+    // has fbReadPmpsDb re-parse the document. It drives this input itself: it is
+    // set when MOTION_GVL.fbPmpsFileReader finishes a successful read and dropped
+    // when the parse is done, so leave it unwired (FALSE) unless a manual one-shot
+    // reload is wanted. BOOL, no units.
     bReadPmpsDb: BOOL;
+    // Which device inside the PMPS JSON document to load. FB_JsonDocToSafeBP looks
+    // for a top-level member of stPmpsDoc named exactly this string and then one
+    // member per state key (arrStates[i].stPMPS.sPmpsState) underneath it.
+    // Case sensitive; typically the motor name, e.g. 'IM3K4:MMS:01'. A name that
+    // is not in the document is reported by fbReadPmpsDb as an error and leaves
+    // the previously loaded parameters in place.
     sPmpsDeviceName: STRING;
+    // Which "in transition" state to load, i.e. the key of the beam parameters
+    // allowed while the motor is moving between two positions. It is written into
+    // arrPMPS[0].sPmpsState and becomes the transition assertion as well as the
+    // fallback when no valid state index is selected. Must be a member key of this
+    // device's PMPS DB entry, e.g. 'Transition'.
     sTransitionKey: STRING;
+    // The parsed PMPS JSON document to read the parameters from. Normally
+    // PMPS_GVL.BP_jsonDoc, which MOTION_GVL.fbPmpsFileReader fills from the DB
+    // file on disk. Pass 0 (unparsed) and the block has no valid beam parameters.
     stPmpsDoc: SJsonValue;
+    // The beam envelope the current state must be able to tolerate for faults to
+    // be reset automatically, used as bAtSafeState :=
+    // F_SafeBPCompare(stHighBeamThreshold, stBeamNeeded). It is a beam-parameter
+    // set, not a scalar limit: the comparison passes when this set is more
+    // conservative than what the current state needs, so at the default full beam
+    // any state that can take full beam counts as safe. Units follow ST_BeamParams:
+    // nTran 0..1 (fraction of transmission, not %), nRate in Hz, neV and neVRange
+    // in eV, nBeamClass/nBCRange as class numbers, aperture Width/Height in mm.
     stHighBeamThreshold: ST_BeamParams := PMPS_GVL.cstFullBeam;
+    // Set TRUE to let ffBeamParamsOk clear itself as soon as the machine beam is
+    // back inside what the current state needs, even if the state cannot take
+    // stHighBeamThreshold; FALSE (default) additionally requires bAtSafeState, so
+    // the fault latches until the motor is in a full-beam state or an operator
+    // resets it. Only the beam-parameter fault is affected; the other ff* faults
+    // keep their own reset rules (see HandleFFO). BOOL, no units.
     bBPOKAutoReset: BOOL := False;
 END_VAR
 VAR
+    // Staging copy of the PMPS DB for the current device: index 0 is the
+    // transition state (loaded from sTransitionKey), 1..MAX_STATES are the
+    // per-state entries copied from arrStates[i].stPMPS. fbReadPmpsDb writes the
+    // beam parameters of every valid key into it, and the result is copied back
+    // into stTransitionBeam, stTransitionDb and arrStates[i].stPMPS.
     arrPMPS: ARRAY[0..GeneralConstants.MAX_STATES] OF ST_DbStateParams;
+    // Loop counter for the arrStates <-> arrPMPS copy loops in HandlePmpsDb.
+    // Counts 1..GeneralConstants.MAX_STATES, no units.
     nBPIndex: UINT;
+    // Arbiter assertion ID of the transition state, taken from
+    // arrPMPS[0].nRequestAssertionID. It is the ID the bptm asserts while the
+    // motor moves, and the one ClearAsserts removes when the arbiter is disabled.
     nTransitionAssertionID: UDINT;
+    // The request assertion ID last handed to the bptm, from
+    // stStateReq.stPMPS.nRequestAssertionID. Used to notice that the requested
+    // state changed without a move, in which case bTransDone is toggled so the
+    // bptm still sees the rising edge it requires.
     nLastReqAssertionID: UDINT;
+    // Parses stPmpsDoc into arrPMPS for sPmpsDeviceName, and raises its own fast
+    // fault (type 16#FF13) on fbFFHWO if the document is missing the device, a
+    // state key or a parameter. Driven by bReadPmpsDb.
     fbReadPmpsDb: FB_JsonDocToSafeBP;
+    // Falling edge of MOTION_GVL.fbPmpsFileReader.bBusy: the DB file reader just
+    // finished. Used to request an automatic reload when it reported no error.
     ftDbBusy: F_TRIG;
+    // Rising edge of bReadPmpsDb: latches the current state keys into arrPMPS
+    // before the parse starts, so the parse knows which members to look for.
     rtReadDBExec: R_TRIG;
+    // Falling edge of fbReadPmpsDb.bBusy: the parse just finished. Used to copy
+    // the freshly loaded parameters into stTransitionBeam, stTransitionDb and
+    // arrStates.
     ftRead: F_TRIG;
+    // Arbiter transition handler: asserts the transition request, waits for the
+    // beam to arrive, then swaps to the requested state's assertion, and reports
+    // the authorization (bInternalAuth) plus its own bDone/bError to this block.
     bptm: BeamParameterTransitionManager;
+    // Fast fault 16#1000: the machine beam is not inside what the current state
+    // needs (bFFOxOk false). Reset needs the beam to be good again plus either
+    // bAtSafeState or bBPOKAutoReset.
     ffBeamParamsOk: FB_FastFault;
+    // Fast fault 16#1001: the current state's beam parameters ask for zero pulse
+    // rate (nRate = 0), so the beam is tripped instead of transmitted. A PMPS
+    // training-wheel check that may already be redundant. Auto-resets.
     ffZeroRate: FB_FastFault;
+    // Fast fault 16#1002: the arbiter did not authorize a requested transition
+    // within tArbiterTimeout (inherited) although a move was wanted. Resets at
+    // safe beam or when the bptm completes without error.
     ffBPTMTimeoutAndMove: FB_FastFault;
+    // Fast fault 16#1003: the bptm itself reported an error, e.g. the arbiter had
+    // no room for the transition plus requested assertions. Resets when a later
+    // transition completes without error.
     ffBPTMError: FB_FastFault;
+    // Fast fault 16#1004: bMaintMode (inherited) is set, i.e. the device is in
+    // maintenance and must not see beam. Auto-resets when maintenance ends.
     ffMaint: FB_FastFault;
+    // Fast fault 16#1005: the motor is neither in a valid state nor moving
+    // between states, so this device's beam parameters are unknown. Auto-resets.
     ffUnknown: FB_FastFault;
+    // Result of F_SafeBPCompare(PMPS_GVL.stCurrentBeamParameters, stBeamNeeded):
+    // TRUE when the machine beam is more conservative than the current state
+    // requires, i.e. the beam is acceptable for this position. Recomputed every
+    // scan in HandleFFO and used as ffBeamParamsOk.i_xOK.
     bFFOxOk: BOOL;
+    // Result of F_SafeBPCompare(stHighBeamThreshold, stBeamNeeded): TRUE when the
+    // current state can tolerate the whole stHighBeamThreshold envelope, so its
+    // faults may be auto-reset without an operator acknowledgement. Recomputed
+    // every scan in HandleFFO.
     bAtSafeState: BOOL;
+    // Loop counter for the "remove every state assertion" loop in ClearAsserts.
+    // Counts 1..GeneralConstants.MAX_STATES, no units.
     nIter: UINT;
 END_VAR
 ]]></Declaration>
