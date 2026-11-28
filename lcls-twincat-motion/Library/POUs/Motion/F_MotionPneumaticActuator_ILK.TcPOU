@@ -1,0 +1,50 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="F_MotionPneumaticActuator_ILK" Id="{c1a4d2e8-8f3b-4d1e-9a67-5b0e2f7c1436}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+    Purpose:
+        Single purpose interlock (ILK) evaluation for a pneumatic actuator driven by
+        FB_MotionPneumaticActuator.
+
+    Usage:
+        Wire the result into the external interlock permit input of the device function block:
+            fbActuator(
+                i_xExtILK_OK := F_MotionPneumaticActuator_ILK(
+                    i_xInsertPermit := ...,
+                    i_xRetractPermit := ...,
+                    i_xPMPSPermit := ...,
+                ),
+            );
+        Add site specific conditions to the arguments of this function, not to the device
+        function block, which contains no site interlock logic itself.
+
+    Objectives:
+        Keep the interlock conditions in one dedicated function instead of scattering them over
+        the reusable device function block, and give the device function block a single permit
+        terminal that cannot be bypassed.
+
+    Returns:
+        TRUE only if every permit condition is satisfied. Unwired inputs default to FALSE, so a
+        missing condition withholds the permit (fail safe).
+
+    Note:
+        FB_MotionPneumaticActuator has a single permit for both directions, so this function
+        requires both direction permits. A site that needs a direction specific permissive must
+        additionally gate its own bInsert_SW/bRetract_SW command bit.
+
+    History:
+        2026-11-28  Audit finding #350: created to carry the ibInsertOK, ibRetractOK and ibPMPS_OK
+                    conditions that used to be separate terminals of FB_MotionPneumaticActuator.
+*)
+FUNCTION F_MotionPneumaticActuator_ILK : BOOL
+VAR_INPUT
+    i_xInsertPermit : BOOL; (*TRUE if the external conditions allow inserting the actuator*)
+    i_xRetractPermit : BOOL; (*TRUE if the external conditions allow retracting the actuator*)
+    i_xPMPSPermit : BOOL; (*TRUE if the PMPS/deviation arbiter permits actuator motion*)
+END_VAR
+]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[F_MotionPneumaticActuator_ILK := i_xInsertPermit AND i_xRetractPermit AND i_xPMPSPermit;]]></ST>
+    </Implementation>
+  </POU>
+</TcPlcObject>

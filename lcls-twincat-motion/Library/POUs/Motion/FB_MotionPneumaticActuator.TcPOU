@@ -1,17 +1,34 @@
 ﻿<?xml version="1.0" encoding="utf-8"?>
 <TcPlcObject Version="1.1.0.1">
   <POU Name="FB_MotionPneumaticActuator" Id="{3965ca68-046c-4858-93f1-aaf5b6059f9e}" SpecialFunc="None">
-    <Declaration><![CDATA[(*This function blcok implements a pnuematic actuator. That can be signle or double acting by setting the ibSingleCntrl accordingly*)
-(* with double acting ibCntrlHold signal should be false, while with single acting the signal should be true*)
+    <Declaration><![CDATA[(*
+    Purpose:
+        Function block for a single- or double-acting pneumatic actuator.
+        That can be single or double acting by setting the ibSingleCntrl accordingly.
+        With double acting ibCntrlHold should be false, while with single acting it should be true.
+
+    Usage:
+        Wire the limit switches and the valve digital I/O, set ibSingleCntrl/ibCntrlHold for the
+        actuator plumbing, and command motion with stPneumaticActuator.bInsert_SW /
+        stPneumaticActuator.bRetract_SW.
+        Site interlock conditions are NOT part of this block: evaluate them in a single-purpose
+        F_<Device>_ILK function (F_MotionPneumaticActuator_ILK for the generic case) and wire the
+        result to the i_xExtILK_OK permit input.
+
+    Objectives:
+        One external permit terminal, the interlock logic in one dedicated place, and no
+        interlock bypass inside this reusable block.
+
+    History:
+        2026-11-28  Audit finding #350: replaced the scattered ibInsertOK/ibRetractOK/ibPMPS_OK
+                    terminals and the ibOverrideInterlock bypass with the single i_xExtILK_OK
+                    permit input (see F_MotionPneumaticActuator_ILK).
+*)
 FUNCTION_BLOCK FB_MotionPneumaticActuator
 VAR_INPUT
-    (*EPS Interlock Bits*)
-    ibInsertOK: BOOL; (*Actuator can be Inserted*)
-    ibRetractOK: BOOL; (*ACtuator can be retracted*)
-    ibPMPS_OK:BOOL; (*to be linked the Arbiter bit*)
+    i_xExtILK_OK: BOOL; (*External interlock permit for motion in either direction. Wire to a single purpose F_<Device>_ILK function, e.g. F_MotionPneumaticActuator_ILK. Defaults FALSE, i.e. no motion permitted*)
     ibSingleCntrl:BOOL;(* TRUE if Actuator requires one Output signal to be activated, FALSE if its double acting i.e two outputs are required*)
     ibCntrlHold:BOOL; (* Control Signal must retain its value, must be TRUE in the case of single acting*)
-    ibOverrideInterlock:BOOL; (*if true interlocks are ignored*)
     // Reset fault
     {attribute 'pytmc' := '
     pv: FFO_Reset
@@ -62,7 +79,7 @@ VAR
     fbLogger : FB_LogMessage := (eSubsystem:=E_SubSystem.MOTION);
     ePrevState : E_PnuematicActuatorPositionState;
     tAction : R_TRIG; // Primary action of this device (Insert_DO, Retract_DO, etc.)
-    tOverrideActivated : R_TRIG;
+    tILKLost : R_TRIG; // Falling edge of the external interlock permit while motion is requested
 
     (*IO*)
     i_xInsertedLS    AT%I*: BOOL;
@@ -109,7 +126,8 @@ stPneumaticActuator.bBusy := (stPneumaticActuator.bRetract_SW AND stPneumaticAct
 (* MPS Faults when the actuator is in motion*)
 xMPS_OK := (stPneumaticActuator.eState=E_PnuematicActuatorPositionState.RETRACTED) OR (stPneumaticActuator.eState=E_PnuematicActuatorPositionState.INSERTED);
 (*PMPS PERMISSION*)
-// yet to be implemented
+// The PMPS/deviation permission is an external condition: it is an input of the
+// F_<Device>_ILK function (see F_MotionPneumaticActuator_ILK) that drives i_xExtILK_OK
 
 (* Can't have bRetract_SW and  bInsert_SW both be true*)
 If (stPneumaticActuator.bRetract_SW) AND (stPneumaticActuator.bInsert_SW) THEN
@@ -127,9 +145,9 @@ IF stPneumaticActuator.q_bRetract THEN
     stPneumaticActuator.bInsert_SW:= FALSE;
 END_IF;
 
-(*Actuate the device*)
-stPneumaticActuator.q_bRetract := stPneumaticActuator.bRetractOK AND stPneumaticActuator.bRetract_SW AND NOT stPneumaticActuator.bInsert_SW ;
-stPneumaticActuator.q_bInsert := stPneumaticActuator.bInsertOK AND stPneumaticActuator.bInsert_SW AND NOT stPneumaticActuator.bRetract_SW ;
+(*Actuate the device: both directions are gated by the single external interlock permit*)
+stPneumaticActuator.q_bRetract := stPneumaticActuator.bILK_OK AND stPneumaticActuator.bRetract_SW AND NOT stPneumaticActuator.bInsert_SW ;
+stPneumaticActuator.q_bInsert := stPneumaticActuator.bILK_OK AND stPneumaticActuator.bInsert_SW AND NOT stPneumaticActuator.bRetract_SW ;
 
 (*Reset the Control signal when command has been executed and give time to ensure the actuator is fully seated in either direction*)
 IF (NOT ibSingleCntrl AND NOT ibCntrlHold) THEN
@@ -162,7 +180,10 @@ fbFF(i_xOK := xMPS_OK,
     io_fbFFHWO := io_fbFFHWO);
 
 (*Soft IO Mapping to Epics pvs*)
-ACT_IO();]]></ST>
+ACT_IO();
+
+(*Log states, commands and interlock transitions*)
+ACT_Logger();]]></ST>
     </Implementation>
     <Action Name="ACT_IO" Id="{090f58e5-b160-4478-a84f-328a90ba6204}">
       <Implementation>
@@ -175,13 +196,21 @@ q_xInsert_DO:=stPneumaticActuator.q_bInsert;
 q_xRetract_DO:=stPneumaticActuator.q_bRetract;
 
 (*EPICS*)
-stPneumaticActuator.bRetractOK := ibRetractOK;
-stPneumaticActuator.bInsertOK := ibInsertOK;]]></ST>
+stPneumaticActuator.bILK_OK := i_xExtILK_OK;
+// Per direction EPICS readbacks of the single external permit
+stPneumaticActuator.bRetractOK := stPneumaticActuator.bILK_OK;
+stPneumaticActuator.bInsertOK := stPneumaticActuator.bILK_OK;]]></ST>
       </Implementation>
     </Action>
     <Action Name="ACT_Logger" Id="{9640fc94-0c07-4d2d-854f-09768bff8197}">
       <Implementation>
-        <ST><![CDATA[// Log Valve timeouts
+        <ST><![CDATA[// Log loss of the external interlock permit while a motion is requested
+tILKLost(CLK:= (NOT stPneumaticActuator.bILK_OK) AND (stPneumaticActuator.bInsert_SW OR stPneumaticActuator.bRetract_SW));
+IF tILKLost.Q THEN
+    fbLogger(sMsg:='Actuator motion blocked: external interlock permit (i_xExtILK_OK) is not OK', eSevr:=TcEventSeverity.Warning);
+END_IF
+
+// Log Valve timeouts
 IF (tInserttimeout.Q OR tRetracttimeout.Q) THEN fbLogger(sMsg:=stPneumaticActuator.sErrorMessage, eSevr:=TcEventSeverity.Warning); END_IF
 
 // Log Actuator commands
@@ -194,6 +223,10 @@ END_IF
 
 
 // State Logging
+// No transition is logged on the first scan, the previous state is unknown then
+IF xFirstPass THEN
+    ePrevState := stPneumaticActuator.eState;
+END_IF
 IF ePrevState <> stPneumaticActuator.eState THEN
       CASE stPneumaticActuator.eState OF
         E_PnuematicActuatorPositionState.INVALID:

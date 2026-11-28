@@ -359,6 +359,9 @@
     <Compile Include="POUs\Motion\FB_MotionPneumaticActuator.TcPOU">
       <SubType>Code</SubType>
     </Compile>
+    <Compile Include="POUs\Motion\F_MotionPneumaticActuator_ILK.TcPOU">
+      <SubType>Code</SubType>
+    </Compile>
     <Compile Include="POUs\Motion\FB_MotionVirtualFrame.TcPOU">
       <SubType>Code</SubType>
     </Compile>
@@ -631,6 +634,9 @@
       <SubType>Code</SubType>
     </Compile>
     <Compile Include="Tests\FB_AtPositionState_Test.TcPOU">
+      <SubType>Code</SubType>
+    </Compile>
+    <Compile Include="Tests\F_MotionPneumaticActuator_ILK_Test.TcPOU">
       <SubType>Code</SubType>
     </Compile>
     <Compile Include="Tests\FB_AxisParameterSetExposed_Test.TcPOU">

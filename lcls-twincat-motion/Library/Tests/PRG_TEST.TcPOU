@@ -4,6 +4,7 @@
     <Declaration><![CDATA[PROGRAM PRG_TEST
 VAR
     fb_AtPositionState_Test: FB_AtPositionState_Test;
+    fb_FMotionPneumaticActuatorILK_Test: F_MotionPneumaticActuator_ILK_Test;
     fb_AxisParameterSetExposed_Test: FB_AxisParameterSetExposed_Test;
     fb_MiscStatesErrorFFO_Test: FB_MiscStatesErrorFFO_Test;
     fb_MotionBPTM_Test: FB_MotionBPTM_Test;

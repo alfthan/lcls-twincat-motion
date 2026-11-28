@@ -1,0 +1,149 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="F_MotionPneumaticActuator_ILK_Test" Id="{80ab03ba-a82d-406d-8e57-f8cb111f5b1f}" SpecialFunc="None">
+    <Declaration><![CDATA[FUNCTION_BLOCK F_MotionPneumaticActuator_ILK_Test EXTENDS TcUnit.FB_TestSuite
+(*
+    Unit tests for F_MotionPneumaticActuator_ILK.
+
+    The function is the single place where the interlock conditions of a pneumatic actuator are
+    combined, so each test checks one permit condition at a time plus the fail safe default.
+
+    History:
+        2026-11-28  Audit finding #350: added with the ILK function that replaces the
+                    ibInsertOK/ibRetractOK/ibPMPS_OK terminals of FB_MotionPneumaticActuator.
+*)
+]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[
+TestAllPermitsOK();
+TestInsertPermitMissing();
+TestRetractPermitMissing();
+TestPMPSPermitMissing();
+TestNoPermits();
+TestUnwiredInputsFailSafe();]]></ST>
+    </Implementation>
+    <Method Name="TestAllPermitsOK" Id="{a80f9aa9-b408-4b2b-a6de-2a564c0fb5d8}">
+      <Declaration><![CDATA[METHOD PRIVATE TestAllPermitsOK
+(*
+    Every permit condition is satisfied, so the permit must be granted.
+*)
+VAR
+END_VAR
+]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[TEST('TestAllPermitsOK');
+AssertTrue(
+    Condition:=F_MotionPneumaticActuator_ILK(
+        i_xInsertPermit:=TRUE,
+        i_xRetractPermit:=TRUE,
+        i_xPMPSPermit:=TRUE,
+    ),
+    Message:='Permit withheld although every interlock condition is satisfied',
+);
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="TestInsertPermitMissing" Id="{4c84a007-7601-4861-b7a2-335bba4bade6}">
+      <Declaration><![CDATA[METHOD PRIVATE TestInsertPermitMissing
+(*
+    A missing insert permit must withhold the permit.
+*)
+VAR
+END_VAR
+]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[TEST('TestInsertPermitMissing');
+AssertFalse(
+    Condition:=F_MotionPneumaticActuator_ILK(
+        i_xInsertPermit:=FALSE,
+        i_xRetractPermit:=TRUE,
+        i_xPMPSPermit:=TRUE,
+    ),
+    Message:='Permit granted although the insert permit is missing',
+);
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="TestRetractPermitMissing" Id="{62e2b169-1527-4dae-a966-43072c14457b}">
+      <Declaration><![CDATA[METHOD PRIVATE TestRetractPermitMissing
+(*
+    A missing retract permit must withhold the permit.
+*)
+VAR
+END_VAR
+]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[TEST('TestRetractPermitMissing');
+AssertFalse(
+    Condition:=F_MotionPneumaticActuator_ILK(
+        i_xInsertPermit:=TRUE,
+        i_xRetractPermit:=FALSE,
+        i_xPMPSPermit:=TRUE,
+    ),
+    Message:='Permit granted although the retract permit is missing',
+);
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="TestPMPSPermitMissing" Id="{f3cdae80-c8a8-45a0-bd61-732720859ecf}">
+      <Declaration><![CDATA[METHOD PRIVATE TestPMPSPermitMissing
+(*
+    A missing PMPS/deviation permit must withhold the permit.
+*)
+VAR
+END_VAR
+]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[TEST('TestPMPSPermitMissing');
+AssertFalse(
+    Condition:=F_MotionPneumaticActuator_ILK(
+        i_xInsertPermit:=TRUE,
+        i_xRetractPermit:=TRUE,
+        i_xPMPSPermit:=FALSE,
+    ),
+    Message:='Permit granted although the PMPS permit is missing',
+);
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="TestNoPermits" Id="{c645bb2e-a93f-42fa-b172-d2346586c106}">
+      <Declaration><![CDATA[METHOD PRIVATE TestNoPermits
+(*
+    No permit condition is satisfied, so the permit must be withheld.
+*)
+VAR
+END_VAR
+]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[TEST('TestNoPermits');
+AssertFalse(
+    Condition:=F_MotionPneumaticActuator_ILK(
+        i_xInsertPermit:=FALSE,
+        i_xRetractPermit:=FALSE,
+        i_xPMPSPermit:=FALSE,
+    ),
+    Message:='Permit granted although no interlock condition is satisfied',
+);
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="TestUnwiredInputsFailSafe" Id="{bf980640-e946-45c3-a44b-53df36e2925b}">
+      <Declaration><![CDATA[METHOD PRIVATE TestUnwiredInputsFailSafe
+(*
+    Unwired permit inputs default to FALSE, so a partially wired ILK function withholds the
+    permit instead of silently granting it.
+*)
+VAR
+END_VAR
+]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[TEST('TestUnwiredInputsFailSafe');
+AssertFalse(
+    Condition:=F_MotionPneumaticActuator_ILK(),
+    Message:='Permit granted although no permit input is wired',
+);
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+  </POU>
+</TcPlcObject>
