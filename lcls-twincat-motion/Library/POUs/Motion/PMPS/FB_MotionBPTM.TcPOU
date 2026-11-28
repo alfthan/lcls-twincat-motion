@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <TcPlcObject Version="1.1.0.1">
   <POU Name="FB_MotionBPTM" Id="{f471bde6-e465-403f-9379-def7c3329cbf}" SpecialFunc="None">
     <Declaration><![CDATA[
@@ -7,7 +7,13 @@ FUNCTION_BLOCK FB_MotionBPTM
     This function block handles the beam parameter transition manager for a group of motors moving together to a destination with shared beam state.
     stGoalParams and stTransParams are required arguments and must not share IDs with other state parameters in the PLC.
 
+    The wait on the arbiter is always timed. When the wait expires the transition request is counted as failed
+    and the BPTM timeout fast fault is raised, whether or not bMoveOnArbiterTimeout lets the motors move anyway.
+
     This is a building block not intended for use outside of lcls-twincat-motion.
+
+    History:
+    2026-11-28, taio: raise the arbiter timeout fast fault on any timeout, not only when moving on timeout.
 *)
 VAR_IN_OUT
     // Array of motors that will move for this beam transition
@@ -32,7 +38,7 @@ VAR_INPUT
     sDeviceName: STRING;
     // How long to wait for parameters before timing out
     tArbiterTimeout: TIME := T#1s;
-    // Whether to fault and move on timeout (TRUE) or to wait (FALSE)
+    // TRUE to authorize the move on an arbiter timeout (the beam is still faulted), FALSE to keep waiting for the arbiter
     bMoveOnArbiterTimeout: BOOL := TRUE;
     // Set to TRUE when it is safe to reset the BPTM timeout fast fault, to reset it early.
     bResetBPTMTimeout: BOOL;
@@ -46,6 +52,8 @@ VAR_OUTPUT
     bDone: BOOL;
     // TRUE if we're using a bad motor count
     bMotorCountError: BOOL;
+    // TRUE while the wait on the arbiter has expired: the transition request is counted as failed.
+    bArbiterTimeout: BOOL;
 END_VAR
 VAR
     bptm: BeamParameterTransitionManager;
@@ -57,8 +65,7 @@ VAR
     bDoneResetQueued: BOOL;
 
     tonArbiter: TON;
-    bArbiterTimeout: BOOL;
-    ffBPTMTimeoutAndMove: FB_FastFault;
+    ffBPTMTimeout: FB_FastFault;
     ffBPTMError: FB_FastFault;
 END_VAR
 ]]></Declaration>
@@ -86,21 +93,24 @@ bMotorCountError S= nActiveMotorCount > MotionConstants.MAX_STATE_MOTORS;
     <Action Name="HandleTimeout" Id="{47918ef2-270e-45c7-89d1-13860ad00457}">
       <Implementation>
         <ST><![CDATA[
-// Measure the time that the bptm is busy
+// Measure the time that the bptm is busy, i.e. the time we have spent waiting on the arbiter
 tonArbiter(
     IN:=bptm.bBusy,
     PT:=tArbiterTimeout,
     Q=>bArbiterTimeout,
 );
+// We may only move if the bptm authorized the transition, or if we are configured to move on a timeout
 bTransitionAuthorized := bInternalAuth OR (bArbiterTimeout AND bMoveOnArbiterTimeout);
 
-// Trip the beam for BPTM timeouts if we want to move
+// The arbiter wait is timed, and on expiry the request is counted as failed and we trip the beam.
+// This happens whether or not we are configured to move anyway (bMoveOnArbiterTimeout), so that a
+// stuck transition can never wait here indefinitely without a fault.
 // Only reset at safe beam OR at no bptm errors (some other FF should catch additional issues)
-ffBPTMTimeoutAndMove.i_xOK := NOT (bArbiterTimeout AND bMoveOnArbiterTimeout AND bEnable);
-ffBPTMTimeoutAndMove.i_xReset S= bResetBPTMTimeout OR (bptm.bDone AND NOT bptm.bError);
-ffBPTMTimeoutAndMove.i_xReset R= NOT ffBPTMTimeoutAndMove.i_xOK;
-ffBPTMTimeoutAndMove.i_xReset := ffBPTMTimeoutAndMove.i_xReset OR NOT bEnable;
-ffBPTMTimeoutAndMove(
+ffBPTMTimeout.i_xOK := NOT (bArbiterTimeout AND bEnable);
+ffBPTMTimeout.i_xReset S= bResetBPTMTimeout OR (bptm.bDone AND NOT bptm.bError);
+ffBPTMTimeout.i_xReset R= NOT ffBPTMTimeout.i_xOK;
+ffBPTMTimeout.i_xReset := ffBPTMTimeout.i_xReset OR NOT bEnable;
+ffBPTMTimeout(
     i_DevName := sDeviceName,
     i_Desc := 'BPTM Timeout',
     i_TypeCode := E_MotionFFType.BPTM_TIMEOUT,

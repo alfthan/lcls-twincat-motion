@@ -38,6 +38,7 @@ TestInit();
 Test3dMove();
 TestNoMove();
 TestCount();
+TestArbiterTimeoutNoMove();
 
 ]]></ST>
     </Implementation>
@@ -439,6 +440,98 @@ fbSubSysIO(
     LA:=fbArbiter,
     FFO:=fbFFHWO,
 );]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="TestArbiterTimeoutNoMove" Id="{f5ea7303-2a5a-469a-bcc2-d8522c8a4219}">
+      <Declaration><![CDATA[METHOD TestArbiterTimeoutNoMove
+(*
+    If the arbiter never confirms the transition and we are configured to wait
+    (bMoveOnArbiterTimeout = FALSE), the timeout must still raise the BPTM timeout
+    fast fault instead of waiting here forever without a fault.
+*)
+VAR_INST
+    fbBptm: FB_MotionBPTM;
+    fbArbiter: FB_Arbiter(2);
+    fbFFHWO: FB_HardwareFFOutput := (bAutoReset := TRUE);
+
+    nState: UINT;
+    tonTimer: TON;
+END_VAR
+]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[
+TEST('TestArbiterTimeoutNoMove');
+
+tonTimer(
+    IN:=TRUE,
+    PT:=T#5s,
+);
+IF tonTimer.Q THEN
+    nState := 3;
+END_IF
+
+// Request a transition, but keep waiting for the arbiter instead of moving on a timeout.
+// We never service the arbiter here (no fbSubSysIO), so the transition is never confirmed.
+SetMotorMoving();
+fbBptm(
+    astMotionStage:=astMotionStage,
+    fbArbiter:=fbArbiter,
+    fbFFHWO:=fbFFHWO,
+    stGoalParams:=stGoal2,
+    stTransParams:=stTrans,
+    nActiveMotorCount:=3,
+    bEnable:=TRUE,
+    bAtState:=FALSE,
+    tArbiterTimeout:=T#200ms,
+    bMoveOnArbiterTimeout:=FALSE,
+);
+fbFFHWO.EvaluateOutput();
+
+CASE nState OF
+    0:
+        // Still inside the timeout: we must not be allowed to move, and the beam is fine
+        IF fbBptm.bArbiterTimeout THEN
+            nState := 1;
+        ELSE
+            AssertFalse(
+                fbBptm.bTransitionAuthorized,
+                'Transition authorized without the arbiter confirming',
+            );
+            AssertTrue(
+                fbFFHWO.q_xFastFaultOut,
+                'Beam tripped before the arbiter timeout expired',
+            );
+        END_IF
+    1:
+        // The wait expired: we still do not move, but the timeout fault must trip the beam
+        AssertFalse(
+            fbBptm.bTransitionAuthorized,
+            'Transition authorized without the arbiter confirming',
+        );
+        AssertFalse(
+            fbFFHWO.q_xFastFaultOut,
+            'BPTM arbiter timeout did not trip the beam',
+        );
+        nState := 2;
+    2:
+        // The timeout fault must stay latched while we are still waiting on the arbiter
+        AssertTrue(
+            fbBptm.bArbiterTimeout,
+            'Arbiter timeout did not stay set while waiting on the arbiter',
+        );
+        AssertFalse(
+            fbFFHWO.q_xFastFaultOut,
+            'BPTM arbiter timeout did not trip the beam',
+        );
+        nState := 3;
+    3:
+        AssertFalse(
+            tonTimer.Q,
+            'Timeout in test',
+        );
+        TEST_FINISHED();
+END_CASE
+]]></ST>
       </Implementation>
     </Method>
   </POU>
