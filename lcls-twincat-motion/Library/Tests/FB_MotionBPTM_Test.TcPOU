@@ -38,6 +38,7 @@ TestInit();
 Test3dMove();
 TestNoMove();
 TestCount();
+TestTimeoutLatch();
 
 ]]></ST>
     </Implementation>
@@ -439,6 +440,164 @@ fbSubSysIO(
     LA:=fbArbiter,
     FFO:=fbFFHWO,
 );]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="BPTMTimeoutFFIdx" Id="{6abafadc-fdd5-44eb-b0b4-b3faef09117f}">
+      <Declaration><![CDATA[METHOD BPTMTimeoutFFIdx : UINT
+(*
+    Find the index of the BPTM timeout fast fault in the fast fault output.
+    Returns 0 if the fast fault has not been registered.
+*)
+VAR_IN_OUT
+    fbFFHWO: FB_HardwareFFOutput;
+END_VAR
+VAR
+    nIdx: UINT;
+END_VAR
+]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[
+BPTMTimeoutFFIdx := 0;
+FOR nIdx := 1 TO PMPS_PARAM.MAX_FAST_FAULTS DO
+    IF fbFFHWO.astFF[nIdx].Info.InUse AND fbFFHWO.astFF[nIdx].Info.TypeCode = E_MotionFFType.BPTM_TIMEOUT THEN
+        BPTMTimeoutFFIdx := nIdx;
+    END_IF
+END_FOR
+]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="TestTimeoutLatch" Id="{fa4a33a8-f5a2-4d45-97db-94be46b06825}">
+      <Declaration><![CDATA[METHOD TestTimeoutLatch
+(*
+    The BPTM timeout fast fault must latch until it is acknowledged with bResetBPTMTimeout.
+    Dropping bEnable and completing the transition must not clear it.
+*)
+VAR_INST
+    fbBptm: FB_MotionBPTM;
+    fbArbiter: FB_Arbiter(2);
+    fbFFHWO: FB_HardwareFFOutput;
+    fbSubSysIO : FB_DummyArbIO;
+
+    nState: UINT;
+    nFaultIdx: UINT;
+    tonTimer: TON;
+    tonTrip: TON;
+END_VAR
+]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[
+TEST('TestTimeoutLatch');
+
+tonTimer(
+    IN:=TRUE,
+    PT:=T#5s,
+);
+IF tonTimer.Q THEN
+    nState := 4;
+END_IF
+
+CASE nState OF
+    0:
+        // A zero arbiter timeout trips the fault as soon as the bptm is busy
+        SetMotorStartup();
+        fbBptm(
+            astMotionStage:=astMotionStage,
+            fbArbiter:=fbArbiter,
+            fbFFHWO:=fbFFHWO,
+            stGoalParams:=stGoal2,
+            stTransParams:=stTrans,
+            nActiveMotorCount:=3,
+            bEnable:=TRUE,
+            bAtState:=FALSE,
+            tArbiterTimeout:=T#0s,
+        );
+        IF nFaultIdx = 0 THEN
+            nFaultIdx := BPTMTimeoutFFIdx(fbFFHWO:=fbFFHWO);
+        END_IF
+        IF nFaultIdx > 0 AND NOT fbFFHWO.astFF[nFaultIdx].BeamPermitted THEN
+            nState := 1;
+        END_IF
+        tonTrip(
+            IN:=TRUE,
+            PT:=T#1s,
+        );
+        AssertFalse(
+            tonTrip.Q,
+            'BPTM timeout fast fault did not trip while the arbiter was timing out',
+        );
+    1:
+        // Dropping bEnable must not clear the latched fault
+        SetMotorStartup();
+        fbBptm(
+            astMotionStage:=astMotionStage,
+            fbArbiter:=fbArbiter,
+            fbFFHWO:=fbFFHWO,
+            stGoalParams:=stGoal2,
+            stTransParams:=stTrans,
+            nActiveMotorCount:=3,
+            bEnable:=FALSE,
+            bAtState:=FALSE,
+            tArbiterTimeout:=T#0s,
+        );
+        AssertFalse(
+            fbFFHWO.astFF[nFaultIdx].BeamPermitted,
+            'BPTM timeout fast fault cleared when bEnable was dropped',
+        );
+        nState := 2;
+    2:
+        // Completing the transition must not clear the latched fault
+        SetMotorDone();
+        fbBptm(
+            astMotionStage:=astMotionStage,
+            fbArbiter:=fbArbiter,
+            fbFFHWO:=fbFFHWO,
+            stGoalParams:=stGoal2,
+            stTransParams:=stTrans,
+            nActiveMotorCount:=3,
+            bEnable:=TRUE,
+            bAtState:=TRUE,
+            tArbiterTimeout:=T#1s,
+        );
+        IF fbBptm.bDone THEN
+            AssertFalse(
+                fbFFHWO.astFF[nFaultIdx].BeamPermitted,
+                'BPTM timeout fast fault cleared when the transition completed',
+            );
+            nState := 3;
+        END_IF
+    3:
+        // The dedicated acknowledge clears the latched fault
+        SetMotorDone();
+        fbBptm(
+            astMotionStage:=astMotionStage,
+            fbArbiter:=fbArbiter,
+            fbFFHWO:=fbFFHWO,
+            stGoalParams:=stGoal2,
+            stTransParams:=stTrans,
+            nActiveMotorCount:=3,
+            bEnable:=TRUE,
+            bAtState:=TRUE,
+            tArbiterTimeout:=T#1s,
+            bResetBPTMTimeout:=TRUE,
+        );
+        AssertTrue(
+            fbFFHWO.astFF[nFaultIdx].BeamPermitted,
+            'BPTM timeout fast fault did not clear after the acknowledge',
+        );
+        nState := 4;
+    4:
+        AssertFalse(
+            tonTimer.Q,
+            'Timeout in test',
+        );
+        TEST_FINISHED();
+END_CASE
+
+fbSubSysIO(
+    LA:=fbArbiter,
+    FFO:=fbFFHWO,
+);
+]]></ST>
       </Implementation>
     </Method>
   </POU>

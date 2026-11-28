@@ -99,6 +99,9 @@ fbMotionBPTM(
     bAtState:=stPlcToEpics.nGetValue = nCurrGoal AND nCurrGoal <> 0,
     sDeviceName:=sDeviceName,
     bRetry:=rtEnable.Q AND nGoalAtClear = nCurrGoal,
+    // The user's RESET PV is the dedicated acknowledge for the latched BPTM fast faults
+    bResetBPTMTimeout:=stEpicsToPlc.bReset,
+    bResetBPTMError:=stEpicsToPlc.bReset,
     bTransitionAuthorized=>,
     bDone=>,
     bMotorCountError=>,

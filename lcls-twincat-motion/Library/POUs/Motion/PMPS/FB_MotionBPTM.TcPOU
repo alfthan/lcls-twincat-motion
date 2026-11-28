@@ -34,8 +34,12 @@ VAR_INPUT
     tArbiterTimeout: TIME := T#1s;
     // Whether to fault and move on timeout (TRUE) or to wait (FALSE)
     bMoveOnArbiterTimeout: BOOL := TRUE;
-    // Set to TRUE when it is safe to reset the BPTM timeout fast fault, to reset it early.
+    // Set to TRUE to acknowledge and reset the BPTM timeout fast fault.
+    // The fault latches until this acknowledge is given, and clears only while it is safe to reset it.
     bResetBPTMTimeout: BOOL;
+    // Set to TRUE to acknowledge and reset the BPTM error fast fault.
+    // The fault latches until this acknowledge is given, and clears only while it is safe to reset it.
+    bResetBPTMError: BOOL;
     // Set to TRUE to make the BPTM retry
     bRetry: BOOL;
 END_VAR
@@ -95,11 +99,11 @@ tonArbiter(
 bTransitionAuthorized := bInternalAuth OR (bArbiterTimeout AND bMoveOnArbiterTimeout);
 
 // Trip the beam for BPTM timeouts if we want to move
-// Only reset at safe beam OR at no bptm errors (some other FF should catch additional issues)
+// This fault latches until it is explicitly acknowledged via bResetBPTMTimeout.
+// Neither disabling the BPTM nor completing the transition may clear it.
 ffBPTMTimeoutAndMove.i_xOK := NOT (bArbiterTimeout AND bMoveOnArbiterTimeout AND bEnable);
-ffBPTMTimeoutAndMove.i_xReset S= bResetBPTMTimeout OR (bptm.bDone AND NOT bptm.bError);
+ffBPTMTimeoutAndMove.i_xReset S= bResetBPTMTimeout;
 ffBPTMTimeoutAndMove.i_xReset R= NOT ffBPTMTimeoutAndMove.i_xOK;
-ffBPTMTimeoutAndMove.i_xReset := ffBPTMTimeoutAndMove.i_xReset OR NOT bEnable;
 ffBPTMTimeoutAndMove(
     i_DevName := sDeviceName,
     i_Desc := 'BPTM Timeout',
@@ -127,8 +131,10 @@ bptm(
 );
 
 // Trip the beam for BPTM Errors
+// This fault latches until it is explicitly acknowledged via bResetBPTMError.
+// A completed transition may not clear it.
 ffBPTMError.i_xOK := NOT bptm.bError;
-ffBPTMError.i_xReset S= bptm.bDone AND ffBPTMError.i_xOK;
+ffBPTMError.i_xReset S= bResetBPTMError;
 ffBPTMError.i_xReset R= NOT ffBPTMError.i_xOK;
 ffBPTMError(
     i_DevName := sDeviceName,
