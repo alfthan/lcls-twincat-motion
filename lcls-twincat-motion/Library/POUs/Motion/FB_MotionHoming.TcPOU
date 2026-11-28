@@ -2,40 +2,138 @@
 <TcPlcObject Version="1.1.0.1">
   <POU Name="FB_MotionHoming" Id="{89795143-e01c-4e96-8d50-67b6176895fe}" SpecialFunc="None">
     <Declaration><![CDATA[FUNCTION_BLOCK FB_MotionHoming
+(*
+    FB_MotionHoming
+
+    Purpose:
+        Reference (home) the single NC axis owned by an ST_MotionStage, following the
+        home command the motor record requests in stMotionStage.nHomingMode. The axis is
+        jogged at the search velocity (stMotionStage.stAxisParameters.fRefVeloSearch)
+        until the requested limit or home sensor is reached, jogged slowly off that
+        switch at the sync velocity (fRefVeloSync) so the switch is always approached
+        from the same side, and MC_SetPosition makes stMotionStage.fHomePosition the new
+        reference position.
+
+    Usage:
+        Call once per cycle from FB_MotionStage, with the stage being homed:
+            fbMotionHome(stMotionStage:=stMotionStage, bExecute:=bExecHome);
+        bExecute is the motor record execute command: the block does nothing while it is
+        FALSE and a sequence only starts on its rising edge. Supported nHomingMode
+        values are LOW_LIMIT, HIGH_LIMIT, HOME_VIA_LOW and HOME_VIA_HIGH (up to two
+        search moves, one per direction, first in the direction implied by the mode),
+        ABSOLUTE_SET (apply fHomePosition to an absolute encoder, no movement) and NONE
+        (no homing configured). The axis must be enabled, and the sequence uses
+        stMotionStage.Axis status directly (limits, home sensor, standstill).
+
+    Objectives:
+        - Home without trusting the soft limits of the pre-homing position: each search
+          move first sets the position to FWD_START/BWD_START, far outside any real
+          travel range, so the limit that is being searched for can never block the
+          move and a stuck start position is obvious instead of a silent limit failure.
+        - Never search forever: at most two search moves (one per direction) and three
+          consecutive MC_Jog errors, then give up with a latched fault.
+        - Stay non-blocking: one action per state, and WAIT_STOP waits for the axis to
+          report standstill before the next action begins.
+        - Report everything to the caller: bBusy while the sequence runs, bDone when it
+          ends, and bError/nErrorID plus stMotionStage.sCustomErrorMessage on failure.
+        - Never hide an abort: dropping bExecute while the axis is still moving ends the
+          sequence with bError and the message "Homing interrupted".
+
+    Units:
+        Positions and velocities are in the engineering units (EGU) of the NC axis
+        scaling: stMotionStage.fHomePosition, FWD_START and BWD_START are EGU,
+        fRefVeloSearch and fRefVeloSync are EGU/s.
+
+    History:
+        2020-11-05  Zachary Lentz   First working homing sequence, wired into the
+                                    FB_MotionStage IOC control loop.
+        2021-01-06  Zachary Lentz   Added the standstill waits to the homing routines.
+        2026-11-28  taio-generic-0  Documented the POU header and every declaration
+                                    (audit finding #336); no functional change.
+*)
 VAR_IN_OUT
+    // The motion stage being homed. Reads Axis, nHomingMode, fHomePosition (EGU),
+    // stAxisParameters.fRefVeloSearch and fRefVeloSync (EGU/s), bHome and the limit
+    // enables; writes sCustomErrorMessage when the sequence faults.
     stMotionStage: ST_MotionStage;
 END_VAR
 VAR_INPUT
+    // Execute the homing sequence. Rising edge starts it and it must stay TRUE until
+    // the sequence ends; the falling edge aborts a running sequence ("Homing
+    // interrupted") and also re-arms bError, so a fault is only held while bExecute
+    // is TRUE.
     bExecute: BOOL;
 END_VAR
 VAR_OUTPUT
+    // TRUE while a homing sequence is running; FALSE in IDLE and once it has ended.
+    // In the ABSOLUTE_SET and NONE modes it is TRUE for the single scan that follows
+    // the rising edge of bExecute.
     bBusy: BOOL;
+    // TRUE once the sequence has ended; in the ABSOLUTE_SET and NONE modes it is
+    // simply the inverse of bBusy. Check bError to tell success from failure, because
+    // the fault path also ends a sequence.
     bDone: BOOL;
+    // Latched fault: no reference found, axis error while searching, or sequence
+    // interrupted by dropping bExecute. Held until bExecute is dropped.
     bError: BOOL;
+    // Error ID of the failing MC_Jog block; 0 while bError is FALSE and also 0 when
+    // the sequence gave up without an axis error (see sCustomErrorMessage).
     nErrorID: UDINT;
 END_VAR
 VAR
+    // Sets the axis position: to fHomePosition for the final reference, or to
+    // FWD_START/BWD_START to take the axis out of the old soft limits while searching.
     fbSetPos: MC_SetPosition;
+    // Continuous jog that performs the search moves and the slow move off the switch,
+    // at fRefVeloSearch and fRefVeloSync respectively.
     fbJog: MC_Jog;
+    // Rising edge of bExecute: starts the sequence, and flashes bBusy/bDone in the
+    // ABSOLUTE_SET and NONE modes.
     rtExec: R_TRIG;
+    // Falling edge of bExecute: turns a sequence that is still moving into an
+    // interrupted-sequence fault.
     ftExec: F_TRIG;
+    // Current state of the homing state machine (IDLE .. WAIT_STOP).
     nHomeStateMachine: INT := IDLE;
+    // State WAIT_STOP goes to once the axis reports standstill.
     nStateAfterStop: INT;
+    // Number of search moves started: move 0 and move 1 pick opposite directions and a
+    // move beyond that is treated as "reference not found".
     nMoves: INT;
+    // TRUE when the first search move goes in the positive direction (HIGH_LIMIT,
+    // HOME_VIA_HIGH); the second search then goes the other way.
     bFirstDirection: BOOL;
+    // TRUE when the requested home sensor or limit is already active at the start, so
+    // the search moves are skipped and FINAL_MOVE runs directly.
     bAtHome: BOOL;
+    // TRUE while the selected nHomingMode needs motion (the limit and home sensor
+    // searches); FALSE for ABSOLUTE_SET and NONE.
     bMove: BOOL;
+    // Consecutive MC_Jog errors in the current search state; the third one faults.
     nErrCount: INT;
+    // TRUE when the fault was caused by bExecute dropping while the axis was still
+    // moving, which selects the "Homing interrupted" message over "Homing failure".
     bInterrupted: BOOL;
 END_VAR
 VAR CONSTANT
+    // State machine: wait for the rising edge of bExecute before doing anything.
     IDLE: INT := 0;
+    // State machine: pick the direction of the next search move.
     NEXT_MOVE: INT := 1;
+    // State machine: search forward at fRefVeloSearch for the home sensor or the
+    // forward limit.
     CHECK_FWD: INT := 2;
+    // State machine: search backward at fRefVeloSearch for the home sensor or the
+    // backward limit.
     CHECK_BWD: INT := 3;
+    // State machine: set the position to fHomePosition and jog slowly off the switch
+    // at fRefVeloSync.
     FINAL_MOVE: INT := 4;
+    // State machine: set the position to fHomePosition for good and finish.
     FINAL_SETPOS: INT := 5;
+    // State machine: latch bError/nErrorID and publish the custom error message.
     ERROR: INT := 6;
+    // State machine: wait for the axis to stand still, then go to nStateAfterStop.
     WAIT_STOP: INT := 7;
 
     (*
@@ -46,7 +144,11 @@ VAR CONSTANT
         If this gets stuck for any reason it's very clear that something has gone wrong,
         rather than a silent failure of the soft limit marks.
     *)
+    // Position (EGU) forced onto the axis before a forward search, so that moving
+    // forward is always allowed; deliberately outside any real travel range.
     FWD_START: LREAL := -99999999;
+    // Position (EGU) forced onto the axis before a backward search, so that moving
+    // backward is always allowed; deliberately outside any real travel range.
     BWD_START: LREAL :=  99999999;
 END_VAR]]></Declaration>
     <Implementation>
