@@ -1,19 +1,87 @@
 ﻿<?xml version="1.0" encoding="utf-8"?>
 <TcPlcObject Version="1.1.0.1">
   <POU Name="FB_MCS2ReadParams" Id="{26b1eb2f-7113-4b0e-bfa2-acd56d914490}" SpecialFunc="None">
-    <Declaration><![CDATA[FUNCTION_BLOCK FB_MCS2ReadParams
+    <Declaration><![CDATA[// FB_MCS2ReadParams - periodic SDO-read cadence generator for the three MCS2
+// channels.
+//
+// PURPOSE
+//     Publishes a one-scan trigger pulse once per nReadTime, starting only after
+//     every MCS2 channel has reported its NC axis parameters at least once. A
+//     caller can use that pulse as a rising edge to kick the channel-parameter
+//     SDO reads on a fixed cadence instead of every PLC cycle.
+//
+// USAGE
+//     Call cyclically, wiring the three channel stages in stMCS2Chan1Stage ..
+//     stMCS2Chan3Stage. The block has no inputs and no outputs of its own: the
+//     pulse is published in bChanReadTrigger and is TRUE for exactly one cycle
+//     at the end of each cadence interval.
+//
+//     Nothing in this repository instantiates FB_MCS2ReadParams, and no caller
+//     reads bChanReadTrigger. The per-channel SDO reads in use today are done by
+//     FB_ReadChanParameters, which each FB_MotionStageMCS2 owns as
+//     fbReadChanParams and paces with ST_MCS2ChanParameter.nReadTime.
+//
+// OBJECTIVES
+//     - Gate the read cadence on axis-parameter initialisation
+//       (ST_MotionStage.bAxisParamsInit means stAxisParameters has been read from
+//       the NC at least once), so no SDO is issued while the axis addressing is
+//       still unknown.
+//     - Keep the cadence in one place (nReadTime) instead of at three per-channel
+//       call sites.
+//     - Publish a pulse rather than a level, so the trigger can be consumed as a
+//       rising edge and cannot be re-executed within one cadence interval.
+//
+// HISTORY
+//     2025-10-28 / Yann Stephen Mandza
+//         Function block created in commit 0fa5f37 ("DS402/MCS2 upgrades: Homing
+//         config, Channel State Refactor & Functional Splits").
+//     2026-11-28 / Scirix Agent
+//         Added this header and the declaration comments; documentation only, no
+//         behaviour change (audit finding #151, convention conv_321640e095c0).
+//
+// NOTE
+//     The fbReadChan<N>Params instances are declared but never called by the
+//     implementation, and the block has no dedicated unit test. Both are
+//     pre-existing and were left untouched by this documentation change. The
+//     cadence pulse is free-running: every expiry re-arms the timer itself, so
+//     the beat continues until the next PLC stop or online reset.
+FUNCTION_BLOCK FB_MCS2ReadParams
 VAR_IN_OUT
+    // MCS2 channel 1 stage (by reference, owned by the caller). Only
+    // bAxisParamsInit is read; no other stage member is used by this block.
     stMCS2Chan1Stage : ST_MotionStage;
+    // MCS2 channel 2 stage (by reference, owned by the caller). Only
+    // bAxisParamsInit is read.
     stMCS2Chan2Stage : ST_MotionStage;
+    // MCS2 channel 3 stage (by reference, owned by the caller). Only
+    // bAxisParamsInit is read.
     stMCS2Chan3Stage : ST_MotionStage;
 END_VAR
 VAR
+    // Per-channel SDO parameter reader instance for channel 1. Declared only:
+    // the implementation below never calls it (see the NOTE in the header).
     fbReadChan1Params : FB_ReadChanParameters;
+    // Per-channel SDO parameter reader instance for channel 2. Declared only,
+    // never called.
     fbReadChan2Params : FB_ReadChanParameters;
+    // Per-channel SDO parameter reader instance for channel 3. Declared only,
+    // never called.
     fbReadChan3Params : FB_ReadChanParameters;
+    // Rising-edge detector on "all three channels initialised". Fires once, so
+    // the cadence timer is started a single time and not restarted every cycle
+    // for as long as the three bAxisParamsInit flags stay TRUE.
     rtExecParamsRead: R_TRIG;
+    // Cadence timer (TON, resolution 1 ms, configured by nReadTime). It is
+    // re-armed whenever it expires, which makes the trigger pulse free-running.
     tonSDOReadTrigger: TON;
+    // Trigger pulse: TRUE for exactly one PLC cycle at the end of each cadence
+    // interval, then cleared when the timer is re-armed. Not exposed as an
+    // output — a caller would have to read the member directly.
     bChanReadTrigger: BOOL;
+    // Cadence interval between two trigger pulses, in TIME units written as a
+    // literal: T#2S is two seconds (TIME is stored in ms, 1 ms resolution).
+    // Independent of the task cycle time; the pulse lands on the first cycle
+    // at or after each interval boundary.
     nReadTime : TIME  := T#2S;
 END_VAR
 ]]></Declaration>
