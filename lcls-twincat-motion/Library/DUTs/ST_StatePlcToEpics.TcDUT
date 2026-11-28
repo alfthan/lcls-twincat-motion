@@ -38,6 +38,15 @@ STRUCT
         field: ONAM True
     '}
     bDone: BOOL;
+    // This will be TRUE if the most recent STATE:SET write was out of range and was rejected, and FALSE otherwise.
+    // It stays TRUE until the next valid set value or a RESET, so a bad EPICS write is visible instead of being silently dropped.
+    {attribute 'pytmc' := '
+        pv: SETINVALID
+        io: i
+        field: ZNAM False
+        field: ONAM True
+    '}
+    bSetValueRejected: BOOL;
     // This will be TRUE if the most recent move had an error and FALSE otherwise.
     {attribute 'pytmc' := '
         pv: ERR

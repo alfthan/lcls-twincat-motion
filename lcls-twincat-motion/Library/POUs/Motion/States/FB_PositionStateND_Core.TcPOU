@@ -73,7 +73,11 @@ fbInput(
     nCurrGoal=>nCurrGoal,
     bExecMove=>,
     bResetMove=>,
+    bSetValueValid=>,
+    bSetValueRejected=>,
 );
+// Publish a rejected, out-of-range EPICS set value to EPICS as STATE:SETINVALID
+stPlcToEpics.bSetValueRejected := fbInput.bSetValueRejected;
 
 FOR nIterMotor := 1 TO MotionConstants.MAX_STATE_MOTORS DO
     IF nCurrGoal > 0 THEN

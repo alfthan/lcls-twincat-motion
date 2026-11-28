@@ -8,7 +8,21 @@
     The desired behavior is:
     - Trigger a move to a new state when the enum PV is written to
     - Interrupt an ongoing move with a new one if the enum changes mid-move
-    - Stop the move if the enum is set to an invalid value
+    - Reject an invalid enum write instead of acting on it
+
+    The set value (stUserInput.nSetValue) is a raw EPICS enum write, so it is sanitized
+    before it is latched:
+    - 0 means "no request".
+    - A request is only valid in 1..GeneralConstants.MAX_STATES.
+    - An out-of-range write is rejected: it is never latched into nQueuedGoal or bNewMove,
+      so it cannot start a bad move and it cannot abort an ongoing move.
+    - While the input is invalid, the last trusted pending request is held unchanged.
+    - bSetValueValid reports the validity of the value seen this cycle and bSetValueRejected
+      latches the rejection until the next valid write or a RESET. The rejection is published
+      to EPICS as STATE:SETINVALID and logged once per event.
+
+    History:
+    - 2026-11-28, Scirix Agent: sanitize the EPICS set value and expose its validity (audit finding #1113).
 *)
 VAR_IN_OUT
     // The user's inputs from EPICS. This is an IN_OUT variable because we will write values back to this to help us detect when the same value is re-caput
@@ -29,6 +43,12 @@ VAR_OUTPUT
     bExecMove: BOOL;
     // The bReset boolean to input to the motion FB
     bResetMove: BOOL;
+
+    // TRUE if the set value seen this cycle was usable (no request, or an in-range request). FALSE if the write was out of range and was rejected.
+    bSetValueValid: BOOL;
+
+    // Latched TRUE when an out-of-range set value was rejected. Clears on the next valid request or on a RESET, and is published to EPICS as STATE:SETINVALID.
+    bSetValueRejected: BOOL;
 END_VAR
 VAR
     nState: UINT;
@@ -36,6 +56,8 @@ VAR
     nQueuedGoal: UINT;
     bNewMove: BOOL;
     nCachedStart: UINT;
+    rtRejected: R_TRIG;
+    fbLog: FB_LogMessage := (eSubsystem := E_Subsystem.MOTION);
 END_VAR
 VAR CONSTANT
     IDLE: UINT := 0;
@@ -54,11 +76,26 @@ IF bResetMove OR NOT bInit THEN
     bExecMove := FALSE;
     nState := IDLE;
     bNewMove := FALSE;
+    // A reset also clears any latched rejection of a bad set value
+    bSetValueValid := TRUE;
+    bSetValueRejected := FALSE;
 END_IF
 
+// Sanitize the raw EPICS enum write before it can latch a move request.
+// 0 means "no request", and a request is only valid in 1..GeneralConstants.MAX_STATES.
+// An out-of-range write must never reach nQueuedGoal or bNewMove: latching it would request a
+// bogus goal while idle and would abort an ongoing move while moving.
+bSetValueValid := stUserInput.nSetValue = 0 OR stUserInput.nSetValue <= GeneralConstants.MAX_STATES;
 IF stUserInput.nSetValue <> 0 THEN
-    nQueuedGoal := stUserInput.nSetValue;
-    bNewMove := TRUE;
+    IF bSetValueValid THEN
+        // Trusted request: latch it, replacing any previous pending request
+        nQueuedGoal := stUserInput.nSetValue;
+        bNewMove := TRUE;
+        bSetValueRejected := FALSE;
+    ELSE
+        // Rejected request: hold the last trusted goal and do not ask for a move
+        bSetValueRejected := TRUE;
+    END_IF
 END_IF
 
 CASE nState OF
@@ -94,6 +131,18 @@ END_CASE
 
 IF bMoveError THEN
     bExecMove := FALSE;
+END_IF
+
+// Report each rejected EPICS write once. The flag stays latched until a valid write or a reset.
+rtRejected(CLK := bSetValueRejected);
+IF rtRejected.Q THEN
+    fbLog(
+        sMsg := CONCAT(
+            'Rejected an out of range state set request from EPICS. The maximum state index is ',
+            UINT_TO_STRING(GeneralConstants.MAX_STATES)
+        ),
+        eSevr := TcEventSeverity.Warning,
+    );
 END_IF
 
 // Detect if the set/start position updates without a move

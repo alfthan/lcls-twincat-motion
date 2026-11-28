@@ -1,0 +1,409 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="FB_StatesInputHandler_Test" Id="{21719234-0047-4CF3-A47B-A563F5F8302B}" SpecialFunc="None">
+    <Declaration><![CDATA[FUNCTION_BLOCK FB_StatesInputHandler_Test EXTENDS FB_TestSuite
+(*
+    Unit tests for FB_StatesInputHandler.
+
+    Focus: the EPICS set value is a raw external input, so it must be sanitized before it is
+    latched. An out-of-range enum write must be rejected instead of requesting a bogus move
+    or aborting an ongoing move, and the rejection must be visible to EPICS.
+
+    Usage: instantiated in PRG_TEST and executed by TcUnit.
+
+    History:
+    - 2026-11-28, Scirix Agent: created to cover the set value sanitization (audit finding #1113).
+*)
+VAR
+END_VAR
+]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[
+TestValidRequest();
+TestOutOfRangeRejected();
+TestOutOfRangeDoesNotAbortMove();
+TestResetClearsRejection();
+]]></ST>
+    </Implementation>
+    <Method Name="TestValidRequest" Id="{6BAEE7AA-93E2-4048-82CA-3902E3CE2378}">
+      <Declaration><![CDATA[METHOD TestValidRequest
+(*
+    An in-range request is latched and starts a move, and is reported as valid.
+*)
+VAR
+    fbInput: FB_StatesInputHandler;
+    stUserInput: ST_StateEpicsToPlc;
+END_VAR
+VAR_INST
+    nStep: UINT;
+END_VAR
+]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[
+TEST('TestValidRequest');
+CASE nStep OF
+    0:
+        // First cycle: seed the goal from the current position state
+        fbInput(
+            stUserInput:=stUserInput,
+            bMoveBusy:=FALSE,
+            nStartingState:=2,
+            bMoveError:=FALSE,
+        );
+        AssertEquals_UINT(
+            Expected:=2,
+            Actual:=fbInput.nCurrGoal,
+            Message:='Init should seed nCurrGoal with nStartingState',
+        );
+        AssertFalse(
+            Condition:=fbInput.bExecMove,
+            Message:='Init should not request a move',
+        );
+        nStep := 1;
+    1:
+        // EPICS puts a valid state request
+        stUserInput.nSetValue := 3;
+        nStep := 2;
+    2:
+        fbInput(
+            stUserInput:=stUserInput,
+            bMoveBusy:=FALSE,
+            nStartingState:=2,
+            bMoveError:=FALSE,
+        );
+        AssertEquals_UINT(
+            Expected:=3,
+            Actual:=fbInput.nCurrGoal,
+            Message:='A valid request should set the goal to the requested state',
+        );
+        AssertTrue(
+            Condition:=fbInput.bExecMove,
+            Message:='A valid request should execute a move',
+        );
+        AssertTrue(
+            Condition:=fbInput.bSetValueValid,
+            Message:='A valid request should report the input as valid',
+        );
+        AssertFalse(
+            Condition:=fbInput.bSetValueRejected,
+            Message:='A valid request should not be reported as rejected',
+        );
+        nStep := 3;
+    3:
+        TEST_FINISHED();
+END_CASE
+]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="TestOutOfRangeRejected" Id="{1E8AAA83-06EC-4187-AF45-F6C627EC857C}">
+      <Declaration><![CDATA[METHOD TestOutOfRangeRejected
+(*
+    An out-of-range request is rejected: nothing is latched, no move is requested,
+    the rejection is indicated, and a later valid write clears it.
+*)
+VAR
+    fbInput: FB_StatesInputHandler;
+    stUserInput: ST_StateEpicsToPlc;
+END_VAR
+VAR_INST
+    nStep: UINT;
+END_VAR
+]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[
+TEST('TestOutOfRangeRejected');
+CASE nStep OF
+    0:
+        // First cycle: seed the goal from the current position state
+        fbInput(
+            stUserInput:=stUserInput,
+            bMoveBusy:=FALSE,
+            nStartingState:=2,
+            bMoveError:=FALSE,
+        );
+        AssertEquals_UINT(
+            Expected:=2,
+            Actual:=fbInput.nCurrGoal,
+            Message:='Init should seed nCurrGoal with nStartingState',
+        );
+        nStep := 1;
+    1:
+        // EPICS puts a value that is not a valid state index
+        stUserInput.nSetValue := GeneralConstants.MAX_STATES + 1;
+        nStep := 2;
+    2:
+        fbInput(
+            stUserInput:=stUserInput,
+            bMoveBusy:=FALSE,
+            nStartingState:=2,
+            bMoveError:=FALSE,
+        );
+        AssertFalse(
+            Condition:=fbInput.bSetValueValid,
+            Message:='An out of range request should be reported as invalid',
+        );
+        AssertTrue(
+            Condition:=fbInput.bSetValueRejected,
+            Message:='An out of range request should be indicated as rejected',
+        );
+        AssertEquals_UINT(
+            Expected:=0,
+            Actual:=fbInput.nQueuedGoal,
+            Message:='An out of range request should not be latched as the queued goal',
+        );
+        AssertEquals_UINT(
+            Expected:=2,
+            Actual:=fbInput.nCurrGoal,
+            Message:='An out of range request should not change the goal',
+        );
+        AssertFalse(
+            Condition:=fbInput.bExecMove,
+            Message:='An out of range request should not execute a move',
+        );
+        nStep := 3;
+    3:
+        // The rejection is latched across cycles while the input is quiet
+        fbInput(
+            stUserInput:=stUserInput,
+            bMoveBusy:=FALSE,
+            nStartingState:=2,
+            bMoveError:=FALSE,
+        );
+        AssertTrue(
+            Condition:=fbInput.bSetValueRejected,
+            Message:='The rejection should stay latched until a valid write or a reset',
+        );
+        AssertFalse(
+            Condition:=fbInput.bExecMove,
+            Message:='The rejected request should still not execute a move',
+        );
+        nStep := 4;
+    4:
+        // A valid write clears the rejection and is honored
+        stUserInput.nSetValue := 1;
+        nStep := 5;
+    5:
+        fbInput(
+            stUserInput:=stUserInput,
+            bMoveBusy:=FALSE,
+            nStartingState:=2,
+            bMoveError:=FALSE,
+        );
+        AssertTrue(
+            Condition:=fbInput.bSetValueValid,
+            Message:='The valid write should report the input as valid',
+        );
+        AssertFalse(
+            Condition:=fbInput.bSetValueRejected,
+            Message:='The valid write should clear the rejection',
+        );
+        AssertEquals_UINT(
+            Expected:=1,
+            Actual:=fbInput.nCurrGoal,
+            Message:='The valid write should set the goal to the requested state',
+        );
+        AssertTrue(
+            Condition:=fbInput.bExecMove,
+            Message:='The valid write should execute a move',
+        );
+        nStep := 6;
+    6:
+        TEST_FINISHED();
+END_CASE
+]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="TestOutOfRangeDoesNotAbortMove" Id="{8C7C0049-13FF-45F9-864E-D59FCA8202E3}">
+      <Declaration><![CDATA[METHOD TestOutOfRangeDoesNotAbortMove
+(*
+    Regression test for the reported issue: an out-of-range write that arrives
+    while a move is in progress must not be latched into a new move request,
+    because that would stop the ongoing move.
+*)
+VAR
+    fbInput: FB_StatesInputHandler;
+    stUserInput: ST_StateEpicsToPlc;
+END_VAR
+VAR CONSTANT
+    // Mirror of FB_StatesInputHandler's internal state constants, for the assertions below
+    cIdle: UINT := 0;
+    cGoing: UINT := 1;
+END_VAR
+VAR_INST
+    nStep: UINT;
+END_VAR
+]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[
+TEST('TestOutOfRangeDoesNotAbortMove');
+CASE nStep OF
+    0:
+        // First cycle: seed the goal from the current position state
+        fbInput(
+            stUserInput:=stUserInput,
+            bMoveBusy:=FALSE,
+            nStartingState:=1,
+            bMoveError:=FALSE,
+        );
+        AssertEquals_UINT(
+            Expected:=1,
+            Actual:=fbInput.nCurrGoal,
+            Message:='Init should seed nCurrGoal with nStartingState',
+        );
+        nStep := 1;
+    1:
+        // Start a valid move to state 2
+        stUserInput.nSetValue := 2;
+        nStep := 2;
+    2:
+        fbInput(
+            stUserInput:=stUserInput,
+            bMoveBusy:=FALSE,
+            nStartingState:=1,
+            bMoveError:=FALSE,
+        );
+        AssertEquals_UINT(
+            Expected:=2,
+            Actual:=fbInput.nCurrGoal,
+            Message:='The valid request should set the goal to state 2',
+        );
+        AssertTrue(
+            Condition:=fbInput.bExecMove,
+            Message:='The valid request should execute a move',
+        );
+        nStep := 3;
+    3:
+        // The motion block reports that it is busy -> the handler goes to GOING
+        fbInput(
+            stUserInput:=stUserInput,
+            bMoveBusy:=TRUE,
+            nStartingState:=1,
+            bMoveError:=FALSE,
+        );
+        AssertEquals_UINT(
+            Expected:=cGoing,
+            Actual:=fbInput.nState,
+            Message:='The handler should be in GOING while the move is in progress',
+        );
+        nStep := 4;
+    4:
+        // An out-of-range write arrives mid-move
+        stUserInput.nSetValue := GeneralConstants.MAX_STATES + 1;
+        nStep := 5;
+    5:
+        fbInput(
+            stUserInput:=stUserInput,
+            bMoveBusy:=TRUE,
+            nStartingState:=1,
+            bMoveError:=FALSE,
+        );
+        AssertEquals_UINT(
+            Expected:=cGoing,
+            Actual:=fbInput.nState,
+            Message:='An out of range request must not stop the ongoing move',
+        );
+        AssertTrue(
+            Condition:=fbInput.bExecMove,
+            Message:='An out of range request must not drop the move execute',
+        );
+        AssertEquals_UINT(
+            Expected:=2,
+            Actual:=fbInput.nQueuedGoal,
+            Message:='An out of range request must not replace the last trusted goal',
+        );
+        AssertTrue(
+            Condition:=fbInput.bSetValueRejected,
+            Message:='An out of range request should be indicated as rejected',
+        );
+        nStep := 6;
+    6:
+        // The move completes and the handler returns to IDLE
+        fbInput(
+            stUserInput:=stUserInput,
+            bMoveBusy:=FALSE,
+            nStartingState:=1,
+            bMoveError:=FALSE,
+        );
+        AssertEquals_UINT(
+            Expected:=cIdle,
+            Actual:=fbInput.nState,
+            Message:='The handler should return to IDLE after the move completes',
+        );
+        AssertFalse(
+            Condition:=fbInput.bExecMove,
+            Message:='The move execute should be cleared after the move completes',
+        );
+        nStep := 7;
+    7:
+        TEST_FINISHED();
+END_CASE
+]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="TestResetClearsRejection" Id="{932858B4-8B77-4EF1-BA3A-044FFB64CC0F}">
+      <Declaration><![CDATA[METHOD TestResetClearsRejection
+(*
+    The RESET input acknowledges and clears a latched rejected-set-value indication.
+*)
+VAR
+    fbInput: FB_StatesInputHandler;
+    stUserInput: ST_StateEpicsToPlc;
+END_VAR
+VAR_INST
+    nStep: UINT;
+END_VAR
+]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[
+TEST('TestResetClearsRejection');
+CASE nStep OF
+    0:
+        fbInput(
+            stUserInput:=stUserInput,
+            bMoveBusy:=FALSE,
+            nStartingState:=1,
+            bMoveError:=FALSE,
+        );
+        nStep := 1;
+    1:
+        stUserInput.nSetValue := GeneralConstants.MAX_STATES + 1;
+        nStep := 2;
+    2:
+        fbInput(
+            stUserInput:=stUserInput,
+            bMoveBusy:=FALSE,
+            nStartingState:=1,
+            bMoveError:=FALSE,
+        );
+        AssertTrue(
+            Condition:=fbInput.bSetValueRejected,
+            Message:='An out of range request should be indicated as rejected',
+        );
+        nStep := 3;
+    3:
+        stUserInput.bReset := TRUE;
+        nStep := 4;
+    4:
+        fbInput(
+            stUserInput:=stUserInput,
+            bMoveBusy:=FALSE,
+            nStartingState:=1,
+            bMoveError:=FALSE,
+        );
+        AssertFalse(
+            Condition:=fbInput.bSetValueRejected,
+            Message:='The reset should clear the rejected set value indication',
+        );
+        AssertTrue(
+            Condition:=fbInput.bSetValueValid,
+            Message:='The input should be reported as valid again after a reset',
+        );
+        nStep := 5;
+    5:
+        TEST_FINISHED();
+END_CASE
+]]></ST>
+      </Implementation>
+    </Method>
+  </POU>
+</TcPlcObject>
