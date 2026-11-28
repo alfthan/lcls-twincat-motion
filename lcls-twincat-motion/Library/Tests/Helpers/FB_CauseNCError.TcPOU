@@ -5,39 +5,73 @@
 (*
     Simulate an NC error.
     This will look like a real NC error for everyone, including TwinCAT itself.
+
+    Pulse bExecute to inject nErrorCode into the axis' NC error register.
+    The outcome is latched: bDone stays TRUE once the write has completed and
+    is only cleared by the caller through bReset. Dropping bExecute (a short
+    pulse, or the end of a test step) must not dismiss the result, so code can
+    still inspect bDone after the command has been released.
+    A new injection does not start until the previous outcome is acknowledged.
 *)
 VAR_IN_OUT
+    // Axis whose NC error register receives the injected error
     Axis: AXIS_REF;
 END_VAR
 VAR_INPUT
+    // Begin the injection on the rising edge, latch the outcome on completion
     bExecute: BOOL;
+    // Acknowledge the latched outcome: clears bDone and re-arms the block
+    bReset: BOOL;
+    // NC error code to write into the drive error register
     nErrorCode: UDINT;
 END_VAR
 VAR_OUTPUT
+    // TRUE while the injection is in progress
     bBusy: BOOL;
+    // Latched TRUE once the error code has been written, held until bReset
     bDone: BOOL;
 END_VAR
 VAR
+    // Rising edge detector for bExecute
     rtExec: R_TRIG;
+    // Writes nErrorCode into the NC drive error register
     adsWrite: ADSWRITE;
+    // Reads the drive address that selects the NC drive error register
     mcReadDriveAddress: MC_ReadDriveAddress;
 END_VAR
 ]]></Declaration>
     <Implementation>
       <ST><![CDATA[
 rtExec(CLK:=bExecute);
-IF NOT bExecute THEN
-    bDone := FALSE;
+
+// Without a valid axis reference there is nothing to inject into, and the
+// NC accesses below would fault.
+IF NOT __ISVALIDREF(Axis) THEN
+    RETURN;
 END_IF
-IF rtExec.Q THEN
+
+// The outcome is latched: only the caller's acknowledge clears it.
+// The falling edge of bExecute must not dismiss the result.
+IF bReset THEN
+    bDone := FALSE;
+    bBusy := FALSE;
+    adsWrite(WRITE:=FALSE);
+    mcReadDriveAddress(Execute:=FALSE);
+END_IF
+
+// Start a new injection on the rising edge of bExecute, but only once the
+// previous outcome has been acknowledged.
+IF rtExec.Q AND NOT bDone AND NOT bReset THEN
     bBusy := TRUE;
 END_IF
+
 IF bBusy AND NOT mcReadDriveAddress.Done THEN
     mcReadDriveAddress(
         Axis:=Axis,
         Execute:=TRUE,
         DriveAddress=>Axis.DriveAddress);
 END_IF
+
 IF bBusy AND mcReadDriveAddress.Done THEN
     bBusy := TRUE;
     adsWrite(
@@ -49,6 +83,7 @@ IF bBusy AND mcReadDriveAddress.Done THEN
         WRITE:=TRUE,
         BUSY=>bBusy);
     IF NOT bBusy THEN
+        // Latch the outcome; bReset is the only thing that clears it.
         bDone := TRUE;
         adsWrite(WRITE:=FALSE);
     END_IF

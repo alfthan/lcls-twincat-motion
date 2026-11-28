@@ -50,9 +50,12 @@ IF bOneTestDone THEN
     bOneTestDone := FALSE;
     nTestCounter := nTestCounter + 1;
     tonTimer(IN:=FALSE);
+    // The error causer latches its done status: acknowledge it here so that
+    // the next test can start a fresh injection.
     fbCauseNCError(
         Axis:=stMotionStage.Axis,
         bExecute:=FALSE,
+        bReset:=TRUE,
     );
     stMotionStage.bReset := TRUE;
     fbMotionStage(stMotionStage:=stMotionStage);
@@ -92,9 +95,11 @@ CASE nState OF
         nState := 1;
     1:
         // Next time: cause an error
+        // Release the acknowledge from the previous test, then inject.
         fbCauseNCError(
             Axis:=stMotionStage.Axis,
             bExecute:=TRUE,
+            bReset:=FALSE,
             nErrorCode:=16#4467, // Invalid encoder position data
         );
 END_CASE
@@ -163,9 +168,11 @@ CASE nState OF
         nState := 1;
     1:
         // Next time: cause an error
+        // Release the acknowledge from the previous test, then inject.
         fbCauseNCError(
             Axis:=stMotionStage.Axis,
             bExecute:=TRUE,
+            bReset:=FALSE,
             nErrorCode:=16#4550, // Position lag monitoring error code
         );
 END_CASE
