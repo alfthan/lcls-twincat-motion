@@ -24,7 +24,7 @@ STRUCT
     // For internal use only. This holds new goal positions as an integer, else it is 0 if there is no new state move request. It is written to from the user's input enum.
     nSetValue: UINT;
 
-    // Set this to TRUE to acknowledge and clear an error.
+    // Set this to TRUE to acknowledge a latched error and a latched done.
     {attribute 'pytmc' := '
         pv: RESET
         io: io

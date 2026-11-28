@@ -12,8 +12,15 @@
     These enums must be passed in as the eEnumSet and eEnumGet VAR_IN_OUT variables.
     The enum values must match the array indices in astPositionState1 and astPositionState2.
 
-    A move will begin when eEnumSet is set to a positive, nonzero value. eEnumSet will be reset to 0 on every cycle, allowing us
-    to accept a new, possibly conflicting, move request on the next cycle to interrupt the first.
+    A move is requested by writing a positive, nonzero, in-range value to eEnumSet. This is a command input and not a level:
+    the request is latched and eEnumSet is cleared back to 0 in the same cycle, so that writing the same value again is
+    understood as a new request.
+
+    The command interface is edge-triggered and never preemptive. The execute is held for the whole move, so a request
+    that arrives while a move is in progress first aborts that move (the execute drops and we wait for the motor to stop)
+    and is only accepted once the block is idle again. The results are latched for the caller: stPlcToEpics.bError (with
+    nErrorID/sErrorMsg) stays TRUE until stEpicsToPlc.bReset acknowledges it, and stPlcToEpics.bDone stays TRUE until
+    that same acknowledge or until the next accepted move command.
 
     The motors must already be set up for point-to-point motion via FB_MotionStage, etc., for this function block to work properly.
 
@@ -38,7 +45,9 @@ VAR_IN_OUT
         expand: :%.2d
     '}
     astPositionState2: ARRAY[1..GeneralConstants.MAX_STATES] OF ST_PositionState;
-    // Set this to a nonzero value to request a new move. It will be reset to zero every cycle. This should be hooked up to a user's EPICS enum input.
+    // Command input: write a nonzero, in-range state index to request a move. The request is latched and this variable is
+    // cleared back to zero in the same cycle, so writing the same value again is understood as a new request.
+    // This should be hooked up to a user's EPICS enum input.
     eEnumSet: UINT;
     // The current state index, or zero if we are not at a state. This should be hooked up to a user's EPICS enum output.
     eEnumGet: UINT;

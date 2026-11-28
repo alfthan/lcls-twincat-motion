@@ -30,7 +30,7 @@ STRUCT
         field: ONAM True
     '}
     bBusy: BOOL;
-    // This will be TRUE after a move completes and FALSE otherwise.
+    // This will be TRUE after a move completes. It is latched, and stays TRUE until the next move request or a RESET acknowledge.
     {attribute 'pytmc' := '
         pv: DONE
         io: i
@@ -38,7 +38,7 @@ STRUCT
         field: ONAM True
     '}
     bDone: BOOL;
-    // This will be TRUE if the most recent move had an error and FALSE otherwise.
+    // This will be TRUE if the most recent move had an error. It is latched until a RESET acknowledge.
     {attribute 'pytmc' := '
         pv: ERR
         io: i

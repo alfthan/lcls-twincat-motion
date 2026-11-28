@@ -13,6 +13,13 @@
     - ... etc.
 
     This is essentially input handling, position state reading, standard management blocks, and the motion state machine.
+
+    Command handling is edge-triggered and never preemptive: the user's enum write is latched into a goal and the
+    execute flag is held for the whole move. A request that arrives while a move is in progress first aborts that
+    move (the execute drops and we wait for the motor to stop) and is only accepted once the block is idle again.
+    The results are latched for the caller: stPlcToEpics.bError (with nErrorID/sErrorMsg) is held until
+    stEpicsToPlc.bReset acknowledges it, and stPlcToEpics.bDone is held until that same acknowledge or until the
+    next accepted move command.
 *)
 VAR_IN_OUT
     // All motors to be used in the states move, including blank/uninitialized structs.
@@ -23,7 +30,9 @@ VAR_IN_OUT
     stEpicsToPlc: ST_StateEpicsToPlc;
     // Normal EPICS outputs, gathered into a single struct
     stPlcToEpics: ST_StatePlcToEpics;
-    // Set this to a nonzero value to request a new move. It will be reset to zero every cycle. This should be hooked up to a user's EPICS enum input.
+    // Command input: write a nonzero, in-range state index to request a move. The request is latched and this variable is
+    // cleared back to zero in the same cycle, so writing the same value again is understood as a new request.
+    // This should be hooked up to a user's EPICS enum input.
     eEnumSet: UINT;
     // The current state index, or zero if we are not at a state. This should be hooked up to a user's EPICS enum output.
     eEnumGet: UINT;
@@ -46,6 +55,8 @@ VAR
     astMoveGoals: ARRAY[1..MotionConstants.MAX_STATE_MOTORS] OF ST_PositionState;
     stInvalidPos: ST_PositionState;
     nIterMotor: DINT;
+    // Done of the most recent completed move, latched until the next accepted move or an acknowledge (bReset)
+    bDoneLatched: BOOL;
 END_VAR]]></Declaration>
     <Implementation>
       <ST><![CDATA[
@@ -95,8 +106,20 @@ fbMove(
     nErrorID=>stPlcToEpics.nErrorID,
     sErrorMessage=>stPlcToEpics.sErrorMsg,
     bBusy=>stPlcToEpics.bBusy,
-    bDone=>stPlcToEpics.bDone,
 );
+
+// Hold Done until the caller acknowledges it or commands a new move. The underlying motion blocks only
+// report Done for a single scan, which a caller polling at a slower rate (e.g. EPICS) would miss, and the
+// convention is that a completion result stays latched until it is acknowledged.
+// A latched error is kept separately in FB_MotionRequest and is cleared only by fbInput.bResetMove.
+IF fbInput.bResetMove THEN
+    bDoneLatched := FALSE;
+ELSIF fbMove.bDone THEN
+    bDoneLatched := TRUE;
+ELSIF fbInput.bExecMove THEN
+    bDoneLatched := FALSE;
+END_IF
+stPlcToEpics.bDone := bDoneLatched;
 
 eEnumSet := stEpicsToPlc.nSetValue;
 eEnumGet := stPlcToEpics.nGetValue;

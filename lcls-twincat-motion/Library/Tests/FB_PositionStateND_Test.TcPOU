@@ -121,6 +121,7 @@ Test3D(7, E_TestStates.OUT);
 Test3D(8, E_TestStates.TARGET1);
 Test3D(9, E_TestStates.TARGET2);
 TestInputDeadlock(10);
+TestDoneLatched(11);
 
 IF bOneTestDone THEN
     bOneTestDone := FALSE;
@@ -473,6 +474,102 @@ IF tonTimer.Q OR nTestStep = 7 THEN
         bEnable:=TRUE,
     );
     bOneTestDone := TRUE;
+    TEST_FINISHED();
+END_IF]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="TestDoneLatched" Id="{d577b25b-189b-466d-854c-6aa2073b65a8}">
+      <Declaration><![CDATA[METHOD TestDoneLatched
+(*
+    Regression test for the latched Done behavior of the states function blocks.
+
+    Done is a completion result and not a one-cycle tick: after the move finishes it must stay TRUE so a
+    caller polling at a slower rate than the PLC cycle (e.g. over EPICS) can still observe it, and it must
+    only be dismissed by an explicit acknowledge (RESET) or by the next accepted move command.
+*)
+VAR_INPUT
+    nTestID: UINT;
+END_VAR
+VAR_INST
+    nTestStep: UINT := 1;
+    nLatchCycles: UINT;
+    eNewGoal: E_TestStates;
+END_VAR]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[
+TEST('TestDoneLatched');
+IF nTestCounter <> nTestID THEN
+    RETURN;
+END_IF
+
+CASE nTestStep OF
+    // Step 1: acknowledge any Done left over from a previous test, and pick a goal
+    1:
+        fb_Move1D.stEpicsToPlc.bReset := TRUE;
+        IF eGetPos = E_TestStates.OUT THEN
+            eNewGoal := E_TestStates.TARGET1;
+        ELSE
+            eNewGoal := E_TestStates.OUT;
+        END_IF
+        IF NOT fb_Move1D.stPlcToEpics.bDone THEN
+            nTestStep := 2;
+        END_IF
+    // Step 2: request a normal move and wait for it to complete
+    2:
+        eSetPos := eNewGoal;
+        IF fb_Move1D.stPlcToEpics.bDone THEN
+            nTestStep := 3;
+        END_IF
+    // Step 3: done must stay latched while we issue no new command
+    3:
+        AssertTrue(
+            Condition:=fb_Move1D.stPlcToEpics.bDone,
+            Message:='Done should stay latched until it is acknowledged',
+        );
+        AssertFalse(
+            Condition:=fb_Move1D.stPlcToEpics.bBusy,
+            Message:='Busy should be False after the move',
+        );
+        nLatchCycles := nLatchCycles + 1;
+        IF nLatchCycles >= 5 THEN
+            nTestStep := 4;
+        END_IF
+    // Step 4: a new move command must dismiss the latched Done
+    4:
+        eSetPos := eNewGoal;
+        IF NOT fb_Move1D.stPlcToEpics.bDone THEN
+            nTestStep := 5;
+        END_IF
+    // Step 5: wait for the second move to finish, then acknowledge and end the test
+    5:
+        IF fb_Move1D.stPlcToEpics.bDone THEN
+            fb_Move1D.stEpicsToPlc.bReset := TRUE;
+            nTestStep := 6;
+        END_IF
+END_CASE
+
+fb_Move1D(
+    stMotionStage:=stMotionStage1,
+    astPositionState:=astPositionState1,
+    eEnumSet:=eSetPos,
+    eEnumGet:=eGetPos,
+    bEnable:=TRUE,
+);
+
+// Timeout and checks
+IF tonTimer.Q OR nTestStep = 6 THEN
+    AssertFalse(
+        Condition:=tonTimer.Q,
+        Message:='Timeout in done latch test',
+    );
+    AssertEquals_UINT(
+        Expected:=6,
+        Actual:=nTestStep,
+        Message:='Done latch test did not run to completion',
+    );
+    bOneTestDone := TRUE;
+    nTestStep := 1;
+    nLatchCycles := 0;
     TEST_FINISHED();
 END_IF]]></ST>
       </Implementation>

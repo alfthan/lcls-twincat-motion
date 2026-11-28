@@ -867,11 +867,9 @@ CASE nState OF
             sDeviceName:='test',
             sTransitionKey:='trans',
         );
-        IF fb_Move1D.stPlcToEpics.bDone THEN
-            AssertFalse(
-                fbArbiter1D.CheckRequestInPool(astBeam[E_TestStates.TARGET1].nRequestAssertionID),
-                'Destination bp should not have been in the arbiter2',
-            );
+        // Done is latched until the next command, so it no longer marks this cycle as "handled".
+        // Instead, wait for the destination request to actually leave the arbiter pool.
+        IF NOT fbArbiter1D.CheckRequestInPool(astBeam[E_TestStates.TARGET1].nRequestAssertionID) THEN
             nState := 2;
         END_IF
     2:

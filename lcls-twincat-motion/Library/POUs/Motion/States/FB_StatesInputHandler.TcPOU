@@ -6,9 +6,12 @@
     Handle the state enum EPICS input for any of the ND state function blocks.
 
     The desired behavior is:
-    - Trigger a move to a new state when the enum PV is written to
-    - Interrupt an ongoing move with a new one if the enum changes mid-move
-    - Stop the move if the enum is set to an invalid value
+    - Trigger a move to a new state when the enum PV is written to. The write is latched as a request and the input
+      is cleared back to 0, so that a repeated write of the same value is seen as a new request.
+    - Never preempt an ongoing move: a request that arrives mid-move first drops the execute and waits for the motor
+      to stop (abort) before the new goal is accepted.
+    - Stop the move if the enum is set to a nonzero value outside of the 1..GeneralConstants.MAX_STATES range.
+    - Hold the execute for the whole move, so that the caller sees a busy block and a latched Done/Error result.
 *)
 VAR_IN_OUT
     // The user's inputs from EPICS. This is an IN_OUT variable because we will write values back to this to help us detect when the same value is re-caput
