@@ -1,0 +1,398 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="FB_MCS2SdoWriteSequence" Id="{1d551593-ab18-45f5-985e-59c9ed392c47}" SpecialFunc="None">
+    <Declaration><![CDATA[(*
+    Purpose:
+        Shared sequential/parallel CoE SDO parameter writer for one group of
+        MCS2 DS402 channel parameters.
+
+        This block is the single implementation of the "startup sweep, then
+        on-demand writes" sequence and of its done/error latching. Parameter
+        blocks such as FB_WriteHomeParameters and FB_WriteStepModeParameters
+        only scale their setpoints, describe their parameter slots and map the
+        outputs; they do not repeat the SDO state machine, so a sequencing or
+        error-handling fix lands once instead of once per block.
+    Usage:
+        Call ConfigureParameter once per cycle for every parameter slot
+        (nSlot 1..nParameterCount), then call the block with bEnable,
+        nParameterCount, tStartUpDelay and bErrorAcknowledge. Wire stDS402Drive
+        and stMotionStage to the owning stage; the block returns immediately
+        while either reference is invalid or while bEnable is FALSE.
+
+        While tonStartUp.Q is FALSE - during tStartUpDelay after enable and
+        again once every parameter is confirmed - each slot whose value differs
+        from the value last written is written in parallel, on demand. When
+        tonStartUp.Q becomes TRUE (still enabled, the delay has elapsed and the
+        parameters are not confirmed yet) or while bForceSequentialSDOs is held
+        TRUE, the sequential IDLE/WRITE/DONE/SDO_ERROR sweep writes one SDO at a
+        time instead, so the CoE mailbox never sees two outstanding requests.
+
+        A failed write latches the fault on stMotionStage.bError/nErrorId and on
+        bError/nErrorId and holds every writer idle; bErrorAcknowledge clears it
+        and restarts the sequential sweep.
+    Objectives:
+        - Keep at most one CoE SDO write in flight during the sequential sweep,
+          driven by a named, non-blocking state machine.
+        - Write a parameter only when its value differs from the last value
+          written to the drive, so a steady setpoint does not hammer the CoE
+          mailbox.
+        - Latch an SDO failure until it is acknowledged and promote it onto the
+          motion stage, so the stage fault path reports it.
+        - Describe a parameter generically (object index, subindex, value, byte
+          length), so any parameter group can reuse the block.
+    History:
+        2026-11-28  Scirix Agent  Created, extracted from the duplicated
+            sequential/parallel SDO state machines of FB_WriteHomeParameters and
+            FB_WriteStepModeParameters (audit finding 9f7bea68, task #374).
+*)
+FUNCTION_BLOCK FB_MCS2SdoWriteSequence
+VAR_INPUT
+    // Master enable. While FALSE the block returns immediately and every writer
+    // keeps its last state.
+    bEnable              : BOOL;
+    // Number of parameter slots the owner configured this cycle
+    // (1..MotionConstants.MAX_MCS2_PARAM_WRITES).
+    nParameterCount      : UINT;
+    // Startup delay after enable. The sequential sweep starts once it elapses
+    // and the parameters are still not confirmed.
+    tStartUpDelay        : TIME := T#4S;
+    // Debug: force the sequential sweep instead of the on-demand parallel path.
+    bForceSequentialSDOs : BOOL := FALSE;
+    // Fault acknowledge: clears a latched SDO fault and restarts the sweep.
+    bErrorAcknowledge    : BOOL;
+END_VAR
+VAR_IN_OUT
+    // DS402 drive the parameters belong to (its slave address is addressed).
+    stDS402Drive  : ST_DS402Drive;
+    // Motion stage that owns the AMS Net Id and receives the promoted fault.
+    stMotionStage : ST_MotionStage;
+END_VAR
+VAR_OUTPUT
+    // TRUE while every configured parameter matches the value last written.
+    bParamsSet : BOOL;
+    // TRUE while at least one CoE SDO write is in flight.
+    bBusy      : BOOL;
+    // TRUE while an SDO write failure is latched (mirrors stMotionStage.bError).
+    bError     : BOOL;
+    // Error id of the latched failure (mirrors stMotionStage.nErrorId).
+    nErrorId   : UINT;
+END_VAR
+VAR
+    // One CoE SDO writer per parameter slot
+    {attribute 'hide'}
+    afbSdoWrite       : ARRAY[1..MotionConstants.MAX_MCS2_PARAM_WRITES] OF FB_EcCoESdoWrite;
+    // Falling edge of a writer's bBusy = that transfer has completed
+    {attribute 'hide'}
+    aftWriteDone      : ARRAY[1..MotionConstants.MAX_MCS2_PARAM_WRITES] OF F_TRIG;
+    // CoE object index of each slot
+    {attribute 'hide'}
+    anObjectIndex     : ARRAY[1..MotionConstants.MAX_MCS2_PARAM_WRITES] OF WORD;
+    // CoE object subindex of each slot
+    {attribute 'hide'}
+    anSubIndex        : ARRAY[1..MotionConstants.MAX_MCS2_PARAM_WRITES] OF BYTE;
+    // Requested value of each slot; the SDO write reads straight out of this buffer
+    {attribute 'hide'}
+    aliValue          : ARRAY[1..MotionConstants.MAX_MCS2_PARAM_WRITES] OF LINT;
+    // Value captured when the transfer was started, per slot
+    {attribute 'hide'}
+    aliRequestedValue : ARRAY[1..MotionConstants.MAX_MCS2_PARAM_WRITES] OF LINT;
+    // Value last written successfully to the drive, per slot
+    {attribute 'hide'}
+    aliWrittenValue   : ARRAY[1..MotionConstants.MAX_MCS2_PARAM_WRITES] OF LINT;
+    // Transfer width in bytes (1..4) of each slot
+    {attribute 'hide'}
+    anBufLen          : ARRAY[1..MotionConstants.MAX_MCS2_PARAM_WRITES] OF UDINT;
+    // Slots in use this cycle: nParameterCount clamped to the array size
+    {attribute 'hide'}
+    nActiveCount      : UINT;
+    // Loop index over the parameter slots
+    {attribute 'hide'}
+    nIter             : UINT;
+    // Slot the sequential sweep is currently writing
+    {attribute 'hide'}
+    nItemIndex        : UINT;
+    // Startup delay gate: Q TRUE hands the writes to the sequential sweep
+    {attribute 'hide'}
+    tonStartUp : TON;
+    // Sequential sweep state
+    eState : (IDLE := 0, WRITE := 1, DONE := 10, SDO_ERROR := -1) := IDLE;
+END_VAR
+]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[IF NOT __ISVALIDREF(stDS402Drive)
+    OR NOT __ISVALIDREF(stMotionStage) THEN
+    RETURN;
+END_IF
+
+IF NOT bEnable THEN
+    RETURN;
+END_IF
+
+// Clamp the caller-supplied slot count before any array access
+nActiveCount := MIN(nParameterCount, MotionConstants.MAX_MCS2_PARAM_WRITES);
+
+// Startup delay: times out while enabled and the parameters are unconfirmed
+tonStartUp(
+    IN := bEnable AND NOT bParamsSet,
+    PT := tStartUpDelay
+);
+
+// Acknowledge a latched SDO fault: clear it and let the sweep start over
+IF eState = SDO_ERROR AND bErrorAcknowledge THEN
+    eState     := IDLE;
+    nItemIndex := 0;
+    bError     := FALSE;
+    nErrorId   := 0;
+    stMotionStage.bError   := FALSE;
+    stMotionStage.nErrorId := 0;
+END_IF
+
+// A transfer completing shows up as the falling edge of its writer's bBusy.
+// Evaluate the edges before this cycle's requests are issued.
+FOR nIter := 1 TO nActiveCount DO
+    aftWriteDone[nIter](CLK := afbSdoWrite[nIter].bBusy);
+END_FOR
+
+IF eState = SDO_ERROR THEN
+    // Latched fault: no further write until bErrorAcknowledge
+    HoldAllWritersIdle();
+ELSIF tonStartUp.Q OR bForceSequentialSDOs THEN
+    // Startup delay elapsed with unconfirmed parameters: one SDO at a time
+    SequentialSweep();
+ELSE
+    // Delay still running, or every parameter confirmed: write changes in parallel
+    IF eState <> IDLE THEN
+        eState     := IDLE;
+        nItemIndex := 0;
+    END_IF
+    ParallelOnDemand();
+END_IF
+
+// Issue this cycle's SDO requests for every configured slot
+FOR nIter := 1 TO nActiveCount DO
+    afbSdoWrite[nIter](
+        sNetId     := stMotionStage.stAxisParameters.sAmsNetId,
+        nSlaveAddr := stDS402Drive.nSlaveAddr,
+        nIndex     := anObjectIndex[nIter],
+        nSubIndex  := anSubIndex[nIter],
+        pSrcBuf    := ADR(aliValue[nIter]),
+        cbBufLen   := anBufLen[nIter]
+    );
+END_FOR
+
+// A transfer in flight always means the parameters are not applied yet
+bBusy := FALSE;
+FOR nIter := 1 TO nActiveCount DO
+    bBusy := bBusy OR afbSdoWrite[nIter].bBusy;
+END_FOR
+bParamsSet R= bBusy;
+]]></ST>
+    </Implementation>
+    <Method Name="ConfigureParameter" Id="{5c585663-59b2-4c25-b0b0-b6fe67768bb0}">
+      <Declaration><![CDATA[(*
+    Describe one parameter slot: the CoE object it lives in and the value that
+    should be written to it. Call once per cycle for every slot in use, before
+    the block itself is called.
+
+    liValue carries the requested value; only the low cbBufLen bytes are
+    transferred, so a BOOL/SINT/UINT/DINT/UDINT parameter is passed as-is and
+    cbBufLen := SIZEOF(<parameter>) keeps the transfer width correct.
+    A slot outside 1..MAX_MCS2_PARAM_WRITES is rejected without touching any
+    other slot.
+*)
+METHOD ConfigureParameter
+VAR_INPUT
+    // Slot to describe (1..MAX_MCS2_PARAM_WRITES)
+    nSlot     : UINT;
+    // CoE object index of the parameter
+    nIndex    : WORD;
+    // CoE object subindex of the parameter
+    nSubIndex : BYTE;
+    // Requested value of the parameter
+    liValue   : LINT;
+    // Transfer width in bytes (1..4), normally SIZEOF(<parameter>)
+    cbBufLen  : UDINT;
+END_VAR
+]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF nSlot < 1 OR nSlot > MotionConstants.MAX_MCS2_PARAM_WRITES THEN
+    RETURN;
+END_IF
+
+anObjectIndex[nSlot] := nIndex;
+anSubIndex[nSlot]    := nSubIndex;
+aliValue[nSlot]      := liValue;
+anBufLen[nSlot]      := MIN(cbBufLen, SIZEOF(aliValue[nSlot]));
+]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="IsValuePending" Id="{db6eca09-31d4-4088-a7da-fe53b90101ec}">
+      <Declaration><![CDATA[(*
+    TRUE while the value requested for slot nSlot differs from the value last
+    written to the drive, i.e. while that parameter still has to be written.
+    A slot outside 1..MAX_MCS2_PARAM_WRITES reports FALSE.
+*)
+METHOD IsValuePending : BOOL
+VAR_INPUT
+    // Slot to test (1..MAX_MCS2_PARAM_WRITES)
+    nSlot : UINT;
+END_VAR
+]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF nSlot < 1 OR nSlot > MotionConstants.MAX_MCS2_PARAM_WRITES THEN
+    IsValuePending := FALSE;
+    RETURN;
+END_IF
+
+IsValuePending := aliValue[nSlot] <> aliWrittenValue[nSlot];
+]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="SequentialSweep" Id="{954c7482-109c-49a9-b4a9-60d4f48c90ea}">
+      <Declaration><![CDATA[// One SDO in flight at a time: IDLE -> WRITE (one slot per completion) -> DONE,
+// or SDO_ERROR when a write fails. Slots already matching the drive are skipped.
+METHOD PRIVATE SequentialSweep
+]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[CASE eState OF
+    IDLE:
+        // Start a new sweep with every writer idle
+        bParamsSet := FALSE;
+        FOR nIter := 1 TO nActiveCount DO
+            afbSdoWrite[nIter].bExecute := FALSE;
+        END_FOR
+        nItemIndex := 1;
+        eState     := WRITE;
+
+    WRITE:
+        IF nItemIndex < 1 OR nItemIndex > nActiveCount THEN
+            eState := DONE;
+        ELSIF NOT IsValuePending(nSlot := nItemIndex) THEN
+            // This parameter already matches the drive: nothing to write
+            AdvanceToNextItem();
+        ELSE
+            // Remember what was asked for: an operator edit during the transfer
+            // must not be recorded as written
+            IF NOT afbSdoWrite[nItemIndex].bExecute THEN
+                aliRequestedValue[nItemIndex] := aliValue[nItemIndex];
+            END_IF
+            afbSdoWrite[nItemIndex].bExecute := TRUE;
+            IF aftWriteDone[nItemIndex].Q THEN
+                // Drop the request before looking at the result, so a failed
+                // write is not re-issued on the next scan
+                afbSdoWrite[nItemIndex].bExecute := FALSE;
+                IF afbSdoWrite[nItemIndex].bError THEN
+                    PromoteFault(nSlot := nItemIndex);
+                    eState := SDO_ERROR;
+                ELSE
+                    aliWrittenValue[nItemIndex] := aliRequestedValue[nItemIndex];
+                    AdvanceToNextItem();
+                END_IF
+            END_IF
+        END_IF
+
+    DONE:
+        bParamsSet := TRUE;
+
+    SDO_ERROR:
+        bParamsSet := FALSE;
+
+    ELSE
+        eState := IDLE;
+END_CASE
+]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="AdvanceToNextItem" Id="{8fa0deee-ba79-4711-90ea-0dc0ae9d3d89}">
+      <Declaration><![CDATA[// Step the sequential sweep on to the next slot, or finish the sweep.
+METHOD PRIVATE AdvanceToNextItem
+]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF nItemIndex >= nActiveCount THEN
+    eState := DONE;
+ELSE
+    nItemIndex := nItemIndex + 1;
+END_IF
+]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="ParallelOnDemand" Id="{35f3c595-fe3d-408f-b7eb-f2e0c05a6ece}">
+      <Declaration><![CDATA[// On-demand path: write every changed slot at once and retire each transfer as
+// it completes. bParamsSet stays FALSE until nothing is pending and nothing is
+// in flight.
+METHOD PRIVATE ParallelOnDemand
+]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[// Request every slot whose value differs from the value last written
+FOR nIter := 1 TO nActiveCount DO
+    IF IsValuePending(nSlot := nIter) THEN
+        IF NOT afbSdoWrite[nIter].bExecute THEN
+            aliRequestedValue[nIter] := aliValue[nIter];
+        END_IF
+        afbSdoWrite[nIter].bExecute := TRUE;
+    END_IF
+END_FOR
+
+// Retire completed transfers; a failure is latched and promoted
+FOR nIter := 1 TO nActiveCount DO
+    IF aftWriteDone[nIter].Q THEN
+        afbSdoWrite[nIter].bExecute := FALSE;
+        IF afbSdoWrite[nIter].bError THEN
+            PromoteFault(nSlot := nIter);
+        ELSE
+            aliWrittenValue[nIter] := aliRequestedValue[nIter];
+        END_IF
+    END_IF
+END_FOR
+
+// Applied only when nothing is pending and nothing is in flight
+bParamsSet := TRUE;
+FOR nIter := 1 TO nActiveCount DO
+    IF IsValuePending(nSlot := nIter) OR afbSdoWrite[nIter].bBusy THEN
+        bParamsSet := FALSE;
+    END_IF
+END_FOR
+]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="HoldAllWritersIdle" Id="{5f7802ad-cb79-418d-963e-8de8ec069315}">
+      <Declaration><![CDATA[// Hold every writer idle and report the parameters as not applied. Used while a
+// fault is latched and before the startup sweep starts.
+METHOD PRIVATE HoldAllWritersIdle
+]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[FOR nIter := 1 TO nActiveCount DO
+    afbSdoWrite[nIter].bExecute := FALSE;
+END_FOR
+
+bParamsSet := FALSE;
+]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="PromoteFault" Id="{e7193955-8681-4424-aca7-9b4a90d3b992}">
+      <Declaration><![CDATA[(*
+    Latch an SDO write failure of one slot: mirror it onto the motion stage and
+    onto bError/nErrorId, and put the sequence into SDO_ERROR so every writer is
+    held idle until bErrorAcknowledge.
+*)
+METHOD PRIVATE PromoteFault
+VAR_INPUT
+    // Slot whose transfer failed (1..MAX_MCS2_PARAM_WRITES)
+    nSlot : UINT;
+END_VAR
+]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF nSlot < 1 OR nSlot > MotionConstants.MAX_MCS2_PARAM_WRITES THEN
+    RETURN;
+END_IF
+
+bError     := afbSdoWrite[nSlot].bError;
+nErrorId   := afbSdoWrite[nSlot].nErrId;
+stMotionStage.bError   := afbSdoWrite[nSlot].bError;
+stMotionStage.nErrorId := afbSdoWrite[nSlot].nErrId;
+eState     := SDO_ERROR;
+]]></ST>
+      </Implementation>
+    </Method>
+  </POU>
+</TcPlcObject>
