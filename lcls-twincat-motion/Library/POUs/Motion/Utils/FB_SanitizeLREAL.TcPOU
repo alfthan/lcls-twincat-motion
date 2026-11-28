@@ -1,0 +1,108 @@
+<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1" ProductVersion="3.1.4024.0">
+  <POU Name="FB_SanitizeLREAL" Id="{8b2e4d76-1c9a-4f38-a7b5-6d0e3f9c2a54}" SpecialFunc="None">
+    <Declaration><![CDATA[FUNCTION_BLOCK FB_SanitizeLREAL
+(*
+    Purpose:
+        Sanitizes one raw external LREAL value (NC actual value, EtherCAT/fieldbus PDO or
+        EPICS link) before it is used or published: it rejects NaN/Inf and out-of-range
+        data, holds the last trusted value while the input is invalid, and exposes a
+        validity flag alongside the value.
+
+    Usage:
+        fbSanitize : FB_SanitizeLREAL;
+        ...
+        fbSanitize(
+            fIn := stMotionStageRx.Axis.NcToPlc.ActPos,
+            fMin := -K_MAX_ABS_NC_ACTUAL,
+            fMax := K_MAX_ABS_NC_ACTUAL
+        );
+        fTrusted := fbSanitize.fOut;   // always safe to publish or consume
+        IF NOT fbSanitize.bValid THEN
+            // this cycle's reading was rejected; fOut holds the previous trusted value
+        END_IF
+
+    Objectives:
+        One implementation of convention conv_4530b54b6234 so that every consumer of
+        external data behaves identically, and so that the reject/hold/validity behaviour
+        can be unit tested once (see FB_SanitizeLREAL_Test).
+
+        This mirrors LCLS_General.FB_SanitizeLREAL so that the motion blocks can sanitize
+        their external inputs without depending on a library release that does not carry it
+        yet. If the referenced LCLS General release starts shipping the shared block, delete
+        this copy and qualify the shared one instead.
+
+        Details:
+        - NaN and +/-Inf are always rejected.
+        - Finite values outside [fMin, fMax] are rejected when bCheckRange is TRUE.
+        - A caller that already knows the reading is untrustworthy (sensor error bit,
+          invalid upstream configuration) clears bValueTrusted instead of having to
+          fabricate a value.
+        - The first accepted value is latched; bHasTrustedValue distinguishes "no data yet"
+          (fOut is 0 and has never been valid) from "holding the last good value".
+        - Callers must keep fMin <= fMax. Inverted limits reject every finite input, which
+          is the fail-safe outcome.
+
+    History:
+        2026-11-28 Scirix audit remediation (audit finding #1102), convention
+                   conv_4530b54b6234 (sanitize external input values and expose validity)
+*)
+VAR_INPUT
+    // Raw external value to validate; never use it downstream without consulting bValid
+    fIn : LREAL;
+    // Lowest value accepted as valid (inclusive)
+    fMin : LREAL := -1.7E308;
+    // Highest value accepted as valid (inclusive)
+    fMax : LREAL := 1.7E308;
+    // TRUE: also reject finite values outside [fMin, fMax]. FALSE: only reject NaN/Inf.
+    bCheckRange : BOOL := TRUE;
+    // FALSE marks the presented value as untrusted regardless of its arithmetic, e.g. when
+    // the sensor reports an error or the upstream configuration is unusable
+    bValueTrusted : BOOL := TRUE;
+    // TRUE clears the held value and starts over, e.g. after a reconfiguration. A value
+    // presented in the same cycle as bReset is discarded.
+    bReset : BOOL;
+END_VAR
+VAR_OUTPUT
+    // Sanitized value: fIn while valid, the last trusted value while invalid
+    fOut : LREAL;
+    // TRUE when fIn was accepted this cycle
+    bValid : BOOL;
+    // TRUE when fIn is NaN or +/-Inf
+    bNotFinite : BOOL;
+    // TRUE when fIn is finite but outside [fMin, fMax]
+    bOutOfRange : BOOL;
+    // TRUE once at least one valid value has been accepted since the last bReset
+    bHasTrustedValue : BOOL;
+END_VAR
+VAR
+    // Most recent accepted value; published on fOut while the input is invalid
+    fLastTrusted : LREAL;
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[// Classify the input before anything is published downstream.
+bNotFinite := NOT F_IsFiniteLREAL(fValue := fIn);
+// The bNotFinite term keeps the two reject reasons mutually exclusive, so a NaN is reported
+// as non-finite only rather than as both non-finite and out of range.
+bOutOfRange := bCheckRange AND (NOT bNotFinite) AND ((fIn < fMin) OR (fIn > fMax));
+bValid := bValueTrusted AND (NOT bNotFinite) AND (NOT bOutOfRange);
+
+IF bReset THEN
+    // Forget the held value: the caller is re-configuring and the old value is meaningless.
+    bHasTrustedValue := FALSE;
+    fLastTrusted := 0.0;
+    fOut := 0.0;
+    bValid := FALSE;
+ELSE
+    IF bValid THEN
+        // Only an accepted reading may refresh the trusted value.
+        fLastTrusted := fIn;
+        bHasTrustedValue := TRUE;
+    END_IF
+    // While invalid the last trusted value is held, so fOut never jumps to garbage and
+    // consumers can tell a fresh reading from a held one by consulting bValid.
+    fOut := fLastTrusted;
+END_IF]]></ST>
+    </Implementation>
+  </POU>
+</TcPlcObject>

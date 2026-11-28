@@ -12,6 +12,15 @@ switched to go from virtual to base frame of reference.
 If enabled, this function block will automatically handle commanding the real axes to move when the virtual axes
 are commanded to move. If not enabled, the function block acts as a calculator, outputing the results of
 calculating motions in a new frame of reference, but not changing any setpoints or commanding any moves.
+
+All NC actual position, velocity and acceleration values read from the three real axes are sanitized
+before they reach the rotation math: NaN/Inf and implausible magnitudes are rejected and the last
+trusted value is held. bNcDataValid reports whether this cycle's drive data was trusted; while it is
+FALSE no move is commanded, so corrupt drive data can never become a real-axis setpoint.
+
+History:
+    2026-11-28 Scirix audit remediation (audit finding #1102): route the NC actual values through
+               FB_SanitizeLREAL and stop commanding moves while they are invalid.
 *)
 VAR_IN_OUT
     stMotionStageRx : ST_MotionStage; // Real X Axis in base frame of reference
@@ -45,6 +54,11 @@ VAR_OUTPUT
     fbRealTarPositionVec3 : FB_Vec3;
     fbRealTarVelocityVec3 : FB_Vec3;
     fbRealTarAcceleraVec3 : FB_Vec3;
+
+    // TRUE when every NC actual value read from the real axes was accepted by the sanitizers
+    // this cycle. FALSE means the rotation math ran on held values because a drive reported
+    // NaN/Inf or an implausible magnitude.
+    bNcDataValid : BOOL;
 END_VAR
 VAR
     fAlphaRadians : LREAL;
@@ -67,6 +81,31 @@ VAR
     fbVirtTarPositionVec3 : FB_Vec3;
     fbVirtTarVelocityVec3 : FB_Vec3;
     fbVirtTarAcceleraVec3 : FB_Vec3;
+
+    // Sanitizers for the NC actual values of the real axes. Each one rejects NaN/Inf and an
+    // implausible magnitude, and holds its last trusted value while the drive data is invalid.
+    fbSanitizeRxPos : FB_SanitizeLREAL;
+    fbSanitizeRxVel : FB_SanitizeLREAL;
+    fbSanitizeRxAcc : FB_SanitizeLREAL;
+    fbSanitizeRyPos : FB_SanitizeLREAL;
+    fbSanitizeRyVel : FB_SanitizeLREAL;
+    fbSanitizeRyAcc : FB_SanitizeLREAL;
+    fbSanitizeRzPos : FB_SanitizeLREAL;
+    fbSanitizeRzVel : FB_SanitizeLREAL;
+    fbSanitizeRzAcc : FB_SanitizeLREAL;
+
+    // TRUE when any NC actual value presented this cycle was NaN or +/-Inf
+    bNcDataNotFinite : BOOL;
+    // TRUE when any NC actual value presented this cycle was finite but implausibly large
+    bNcDataOutOfRange : BOOL;
+    // Message latched on the virtual axes while the NC actual values are not trusted
+    sNcDataError : STRING;
+END_VAR
+VAR CONSTANT
+    // Largest magnitude accepted for an NC actual position, velocity or acceleration. Real
+    // stages report engineering units far below this bound; a larger magnitude means the drive
+    // data is corrupt and must not reach the rotation math.
+    K_MAX_ABS_NC_ACTUAL : LREAL := 1.0E15;
 END_VAR
 ]]></Declaration>
     <Implementation>
@@ -79,17 +118,8 @@ rtExecuteVx(CLK := stMotionStageVx.bBusy);
 rtExecuteVy(CLK := stMotionStageVy.bBusy);
 rtExecuteVz(CLK := stMotionStageVz.bBusy);
 
-fbRealActPositionVec3.x := stMotionStageRx.Axis.NcToPlc.ActPos;
-fbRealActPositionVec3.y := stMotionStageRy.Axis.NcToPlc.ActPos;
-fbRealActPositionVec3.z := stMotionStageRz.Axis.NcToPlc.ActPos;
-
-fbRealActVelocityVec3.x := stMotionStageRx.Axis.NcToPlc.ActVelo;
-fbRealActVelocityVec3.y := stMotionStageRy.Axis.NcToPlc.ActVelo;
-fbRealActVelocityVec3.z := stMotionStageRz.Axis.NcToPlc.ActVelo;
-
-fbRealActAcceleraVec3.x := stMotionStageRx.Axis.NcToPlc.ActAcc;
-fbRealActAcceleraVec3.y := stMotionStageRy.Axis.NcToPlc.ActAcc;
-fbRealActAcceleraVec3.z := stMotionStageRz.Axis.NcToPlc.ActAcc;
+// The NC actual values are external input: they arrive from the drive through the NC.
+SanitizeNcActuals();
 
 sOrderReversed := ReverseOrder(sOrder);
 
@@ -160,7 +190,24 @@ ELSE
 END_IF
 
 IF bEnable THEN
-    IF rtExecuteVx.Q OR rtExecuteVy.Q OR rtExecuteVz.Q THEN
+    // Act on the sanitizer validity before any setpoint is written: drive data that failed
+    // sanitization must never become a real-axis setpoint, so hold the virtual axes instead.
+    IF NOT bNcDataValid THEN
+        IF bNcDataNotFinite THEN
+            sNcDataError := 'A real axis reported a NaN/Inf NC actual value. Virtual frame moves are held.';
+        ELSE
+            sNcDataError := 'A real axis reported an out-of-range NC actual value. Virtual frame moves are held.';
+        END_IF
+
+        stMotionStageVx.bError := TRUE;
+        stMotionStageVy.bError := TRUE;
+        stMotionStageVz.bError := TRUE;
+        stMotionStageVx.sCustomErrorMessage := sNcDataError;
+        stMotionStageVy.sCustomErrorMessage := sNcDataError;
+        stMotionStageVz.sCustomErrorMessage := sNcDataError;
+    END_IF
+
+    IF bNcDataValid AND (rtExecuteVx.Q OR rtExecuteVy.Q OR rtExecuteVz.Q) THEN
         stMotionStageRx.fPosition := fbRealTarPositionVec3.x;
         stMotionStageRy.fPosition := fbRealTarPositionVec3.y;
         stMotionStageRz.fPosition := fbRealTarPositionVec3.z;
@@ -179,7 +226,7 @@ IF bEnable THEN
 
         IF stMotionStageRx.fVelocity >= 0.001 THEN
             stMotionStageRx.bMoveCmd := TRUE;
-        ELSIF ABS(stMotionStageRx.fPosition - stMotionStageRx.Axis.NcToPlc.ActPos) >
+        ELSIF ABS(stMotionStageRx.fPosition - fbSanitizeRxPos.fOut) >
                 stMotionStageRx.stAxisParameters.fTargetPosControlRange THEN
             stMotionStageRx.fVelocity := 0.001;
             stMotionStageRx.bMoveCmd := TRUE;
@@ -187,7 +234,7 @@ IF bEnable THEN
 
         IF stMotionStageRy.fVelocity >= 0.001 THEN
             stMotionStageRy.bMoveCmd := TRUE;
-        ELSIF ABS(stMotionStageRy.fPosition - stMotionStageRy.Axis.NcToPlc.ActPos) >
+        ELSIF ABS(stMotionStageRy.fPosition - fbSanitizeRyPos.fOut) >
                 stMotionStageRy.stAxisParameters.fTargetPosControlRange THEN
             stMotionStageRy.fVelocity := 0.001;
             stMotionStageRy.bMoveCmd := TRUE;
@@ -195,7 +242,7 @@ IF bEnable THEN
 
         IF stMotionStageRz.fVelocity >= 0.001 THEN
             stMotionStageRz.bMoveCmd := TRUE;
-        ELSIF ABS(stMotionStageRz.fPosition - stMotionStageRz.Axis.NcToPlc.ActPos) >
+        ELSIF ABS(stMotionStageRz.fPosition - fbSanitizeRzPos.fOut) >
                 stMotionStageRz.stAxisParameters.fTargetPosControlRange THEN
             stMotionStageRz.fVelocity := 0.001;
             stMotionStageRz.bMoveCmd := TRUE;
@@ -288,6 +335,113 @@ fbNewFrameAcceleraVec3 := F_EulerRotateVec3Frame(
     fGammaRadians := fGammaRadians,
     sOrder := sOrder
 );]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="SanitizeNcActuals" Id="{2f8c6b40-53a7-4d19-8e6b-90c4a7f15d32}">
+      <Declaration><![CDATA[METHOD PUBLIC SanitizeNcActuals
+(*
+    Purpose:
+        Reads the NC actual position, velocity and acceleration of the three real axes,
+        sanitizes them, and publishes the trusted results on the real-actual vectors.
+
+    Usage:
+        Called once per cycle at the top of the implementation, before any rotation math.
+
+    Objectives:
+        Keep every raw NC value out of the calculations below: a NaN/Inf or implausible value is
+        rejected and the sanitizer holds the last trusted one, so the rotation math can never
+        turn corrupt drive data into a target setpoint. bNcDataValid aggregates the nine
+        per-value validity flags so that the caller logic can refuse to command moves.
+
+    History:
+        2026-11-28 Scirix audit remediation (audit finding #1102), convention
+                   conv_4530b54b6234 (sanitize external input values and expose validity)
+*)
+]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[fbSanitizeRxPos(
+    fIn := stMotionStageRx.Axis.NcToPlc.ActPos,
+    fMin := -K_MAX_ABS_NC_ACTUAL,
+    fMax := K_MAX_ABS_NC_ACTUAL
+);
+
+fbSanitizeRxVel(
+    fIn := stMotionStageRx.Axis.NcToPlc.ActVelo,
+    fMin := -K_MAX_ABS_NC_ACTUAL,
+    fMax := K_MAX_ABS_NC_ACTUAL
+);
+
+fbSanitizeRxAcc(
+    fIn := stMotionStageRx.Axis.NcToPlc.ActAcc,
+    fMin := -K_MAX_ABS_NC_ACTUAL,
+    fMax := K_MAX_ABS_NC_ACTUAL
+);
+
+fbSanitizeRyPos(
+    fIn := stMotionStageRy.Axis.NcToPlc.ActPos,
+    fMin := -K_MAX_ABS_NC_ACTUAL,
+    fMax := K_MAX_ABS_NC_ACTUAL
+);
+
+fbSanitizeRyVel(
+    fIn := stMotionStageRy.Axis.NcToPlc.ActVelo,
+    fMin := -K_MAX_ABS_NC_ACTUAL,
+    fMax := K_MAX_ABS_NC_ACTUAL
+);
+
+fbSanitizeRyAcc(
+    fIn := stMotionStageRy.Axis.NcToPlc.ActAcc,
+    fMin := -K_MAX_ABS_NC_ACTUAL,
+    fMax := K_MAX_ABS_NC_ACTUAL
+);
+
+fbSanitizeRzPos(
+    fIn := stMotionStageRz.Axis.NcToPlc.ActPos,
+    fMin := -K_MAX_ABS_NC_ACTUAL,
+    fMax := K_MAX_ABS_NC_ACTUAL
+);
+
+fbSanitizeRzVel(
+    fIn := stMotionStageRz.Axis.NcToPlc.ActVelo,
+    fMin := -K_MAX_ABS_NC_ACTUAL,
+    fMax := K_MAX_ABS_NC_ACTUAL
+);
+
+fbSanitizeRzAcc(
+    fIn := stMotionStageRz.Axis.NcToPlc.ActAcc,
+    fMin := -K_MAX_ABS_NC_ACTUAL,
+    fMax := K_MAX_ABS_NC_ACTUAL
+);
+
+// Aggregated validity: TRUE only when all nine values presented this cycle were accepted.
+bNcDataValid :=
+    fbSanitizeRxPos.bValid AND fbSanitizeRxVel.bValid AND fbSanitizeRxAcc.bValid
+    AND fbSanitizeRyPos.bValid AND fbSanitizeRyVel.bValid AND fbSanitizeRyAcc.bValid
+    AND fbSanitizeRzPos.bValid AND fbSanitizeRzVel.bValid AND fbSanitizeRzAcc.bValid;
+
+bNcDataNotFinite :=
+    fbSanitizeRxPos.bNotFinite OR fbSanitizeRxVel.bNotFinite OR fbSanitizeRxAcc.bNotFinite
+    OR fbSanitizeRyPos.bNotFinite OR fbSanitizeRyVel.bNotFinite OR fbSanitizeRyAcc.bNotFinite
+    OR fbSanitizeRzPos.bNotFinite OR fbSanitizeRzVel.bNotFinite OR fbSanitizeRzAcc.bNotFinite;
+
+bNcDataOutOfRange :=
+    fbSanitizeRxPos.bOutOfRange OR fbSanitizeRxVel.bOutOfRange OR fbSanitizeRxAcc.bOutOfRange
+    OR fbSanitizeRyPos.bOutOfRange OR fbSanitizeRyVel.bOutOfRange OR fbSanitizeRyAcc.bOutOfRange
+    OR fbSanitizeRzPos.bOutOfRange OR fbSanitizeRzVel.bOutOfRange OR fbSanitizeRzAcc.bOutOfRange;
+
+// Only sanitized values reach the rotation math: each is either this cycle's trusted reading or
+// the last reading that was trusted.
+fbRealActPositionVec3.x := fbSanitizeRxPos.fOut;
+fbRealActPositionVec3.y := fbSanitizeRyPos.fOut;
+fbRealActPositionVec3.z := fbSanitizeRzPos.fOut;
+
+fbRealActVelocityVec3.x := fbSanitizeRxVel.fOut;
+fbRealActVelocityVec3.y := fbSanitizeRyVel.fOut;
+fbRealActVelocityVec3.z := fbSanitizeRzVel.fOut;
+
+fbRealActAcceleraVec3.x := fbSanitizeRxAcc.fOut;
+fbRealActAcceleraVec3.y := fbSanitizeRyAcc.fOut;
+fbRealActAcceleraVec3.z := fbSanitizeRzAcc.fOut;]]></ST>
       </Implementation>
     </Method>
     <Method Name="SetTargetPosVelAcc1D" Id="{c0957557-35ec-4203-a92e-41f437a57b08}">

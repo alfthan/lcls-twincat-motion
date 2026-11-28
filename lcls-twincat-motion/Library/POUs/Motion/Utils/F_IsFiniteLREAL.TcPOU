@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1" ProductVersion="3.1.4024.0">
+  <POU Name="F_IsFiniteLREAL" Id="{3f6d2c1a-7b84-4c19-9d2e-5a0b8c4e7f21}" SpecialFunc="None">
+    <Declaration><![CDATA[FUNCTION F_IsFiniteLREAL : BOOL
+(*
+    Purpose:
+        Reports whether an LREAL holds a finite IEEE-754 value, so that callers can reject
+        NaN and +/-Inf before the value is used in math or published to EPICS.
+
+    Usage:
+        IF F_IsFiniteLREAL(fValue := fRawExternal) THEN
+            // safe to consume
+        END_IF
+
+    Objectives:
+        Provide the one shared NaN/Inf test used by every block that consumes external data
+        (NC actual values, EtherCAT/fieldbus PDOs, EPICS links) instead of each block
+        inventing its own comparison, per convention conv_4530b54b6234.
+
+        This mirrors LCLS_General.F_IsFiniteLREAL so that the motion blocks can sanitize
+        their external inputs without depending on a library release that does not carry it
+        yet. If the referenced LCLS General release starts shipping the shared function,
+        delete this copy and qualify the shared one instead.
+
+    History:
+        2026-11-28 Scirix audit remediation (audit finding #1102), convention
+                   conv_4530b54b6234 (sanitize external input values and expose validity)
+*)
+VAR_INPUT
+    // Value to test
+    fValue : LREAL;
+END_VAR
+VAR CONSTANT
+    // Largest magnitude a finite LREAL is taken to hold. Values beyond this bound are
+    // treated as +/-Inf. The margin below LREAL_MAX only excludes values that cannot
+    // arise from a physical measurement.
+    K_MAX_FINITE_ABS : LREAL := 1.7E308;
+END_VAR]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[// NaN compares FALSE against every bound (so the inclusive test below fails), and +/-Inf
+// exceeds the largest finite LREAL, so a single test rejects both without bit inspection.
+F_IsFiniteLREAL := (fValue >= -K_MAX_FINITE_ABS) AND (fValue <= K_MAX_FINITE_ABS);]]></ST>
+    </Implementation>
+  </POU>
+</TcPlcObject>
