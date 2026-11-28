@@ -1,0 +1,184 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<TcPlcObject Version="1.1.0.1">
+  <POU Name="FB_MotionStageSetAndMoveHelper_Test" Id="{70317f0d-923a-4b4b-b0a1-ca41478c7af9}" SpecialFunc="None">
+    <Declaration><![CDATA[FUNCTION_BLOCK FB_MotionStageSetAndMoveHelper_Test EXTENDS TcUnit.FB_TestSuite
+(*
+    Tests for FB_MotionStageSetAndMoveHelper.
+
+    The helper sets a start position and then commands a move for other tests, so
+    it must not pass a caller-supplied setpoint to MC_SetPosition or to the
+    ST_MotionStage command interface without checking it against the axis limits.
+    These tests configure a known set of axis limits and verify that an
+    out-of-range start position, goal position or velocity is rejected and latched
+    instead of being commanded, and that the rejection clears on Reset().
+
+    A bare ST_MotionStage is used as the stage: every request here is rejected, so
+    no motion function block is ever executed against an axis.
+*)
+VAR
+    // The motion stage whose axis limits the helper is checked against
+    stMotionStage: ST_MotionStage;
+    // The function block under test
+    fbSetAndMove: FB_MotionStageSetAndMoveHelper;
+END_VAR
+]]></Declaration>
+    <Implementation>
+      <ST><![CDATA[// Stand in for the axis parameters that FB_MotionStageNCParams reads back from
+// the axis, so that the limits under test are known: positions from -10 to 10 EU
+// and a maximum velocity of 2 EU/s.
+stMotionStage.stAxisParameters.fEncSoftEndMin := -10.0;
+stMotionStage.stAxisParameters.fEncSoftEndMax := 10.0;
+stMotionStage.stAxisParameters.fVeloMaximum := 2.0;
+stMotionStage.bAxisParamsInit := TRUE;
+
+TestRejectOutOfRangeSetpoints();
+]]></ST>
+    </Implementation>
+    <Method Name="TestRejectOutOfRangeSetpoints" Id="{b0c0a091-cdb0-42d1-a344-6c07975fc104}">
+      <Declaration><![CDATA[METHOD TestRejectOutOfRangeSetpoints
+(*
+    Walk through one rejected request per limit: a start position above the upper
+    soft limit, a goal position below the lower soft limit and a velocity above
+    the axis maximum velocity. Each rejection must latch and must not command
+    anything, and Reset() must clear it.
+*)
+VAR_INST
+    // Which step of the sequence runs this cycle
+    nStep: UINT;
+    // TRUE once the test is finished, so it does not run again
+    bDone: BOOL;
+END_VAR
+]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[IF bDone THEN
+    RETURN;
+END_IF
+TEST('TestRejectOutOfRangeSetpoints');
+
+CASE nStep OF
+    0:
+        // A start position above the upper soft limit
+        fbSetAndMove(
+            stMotionStage:=stMotionStage,
+            bExecute:=TRUE,
+            fStartPosition:=stMotionStage.stAxisParameters.fEncSoftEndMax + 1.0,
+            fGoalPosition:=0.0,
+            fVelocity:=1.0,
+            fDelta:=0.1,
+        );
+        nStep := 1;
+    1:
+        // The out-of-range start position must be rejected and nothing commanded
+        AssertTrue(
+            Condition:=fbSetAndMove.bError,
+            Message:='Out-of-range start position was not rejected.',
+        );
+        AssertEquals_UDINT(
+            E_LCLSMotionError.INVALID,
+            fbSetAndMove.nErrorId,
+            'Wrong error id for the rejected start position.',
+        );
+        AssertEquals_STRING(
+            'Rejected start position outside of the axis limits',
+            fbSetAndMove.sErrorMessage,
+            'Wrong error message for the rejected start position.',
+        );
+        AssertFalse(
+            Condition:=fbSetAndMove.bSetDone,
+            Message:='Set position reported done for a rejected request.',
+        );
+        AssertFalse(
+            Condition:=fbSetAndMove.bMotionStarted,
+            Message:='Motion started for a rejected request.',
+        );
+        AssertFalse(
+            Condition:=stMotionStage.bMoveCmd,
+            Message:='Move commanded for a rejected request.',
+        );
+        fbSetAndMove.Reset(stMotionStage:=stMotionStage);
+        nStep := 2;
+    2:
+        // Reset must clear the rejection
+        AssertFalse(
+            Condition:=fbSetAndMove.bError,
+            Message:='Reset did not clear the rejected setpoint error.',
+        );
+        AssertEquals_UDINT(
+            0,
+            fbSetAndMove.nErrorId,
+            'Reset did not clear the rejected setpoint error id.',
+        );
+        // A goal position below the lower soft limit
+        fbSetAndMove(
+            stMotionStage:=stMotionStage,
+            bExecute:=TRUE,
+            fStartPosition:=0.0,
+            fGoalPosition:=stMotionStage.stAxisParameters.fEncSoftEndMin - 1.0,
+            fVelocity:=1.0,
+            fDelta:=0.1,
+        );
+        nStep := 3;
+    3:
+        AssertTrue(
+            Condition:=fbSetAndMove.bError,
+            Message:='Out-of-range goal position was not rejected.',
+        );
+        AssertEquals_STRING(
+            'Rejected goal position outside of the axis limits',
+            fbSetAndMove.sErrorMessage,
+            'Wrong error message for the rejected goal position.',
+        );
+        fbSetAndMove.Reset(stMotionStage:=stMotionStage);
+        nStep := 4;
+    4:
+        // A velocity above the axis maximum velocity
+        fbSetAndMove(
+            stMotionStage:=stMotionStage,
+            bExecute:=TRUE,
+            fStartPosition:=0.0,
+            fGoalPosition:=1.0,
+            fVelocity:=stMotionStage.stAxisParameters.fVeloMaximum + 1.0,
+            fDelta:=0.1,
+        );
+        nStep := 5;
+    5:
+        AssertTrue(
+            Condition:=fbSetAndMove.bError,
+            Message:='Out-of-range velocity was not rejected.',
+        );
+        AssertEquals_STRING(
+            'Rejected velocity outside of the axis velocity range',
+            fbSetAndMove.sErrorMessage,
+            'Wrong error message for the rejected velocity.',
+        );
+        // Drop the execute input while still requesting the rejected move
+        fbSetAndMove(
+            stMotionStage:=stMotionStage,
+            bExecute:=FALSE,
+            fStartPosition:=0.0,
+            fGoalPosition:=1.0,
+            fVelocity:=stMotionStage.stAxisParameters.fVeloMaximum + 1.0,
+            fDelta:=0.1,
+        );
+        nStep := 6;
+    6:
+        // Dropping the command input must not dismiss the latched rejection
+        AssertTrue(
+            Condition:=fbSetAndMove.bError,
+            Message:='Dropping bExecute cleared the latched setpoint rejection.',
+        );
+        fbSetAndMove.Reset(stMotionStage:=stMotionStage);
+        nStep := 7;
+    7:
+        AssertFalse(
+            Condition:=fbSetAndMove.bError,
+            Message:='Reset did not clear the latched setpoint rejection.',
+        );
+        bDone := TRUE;
+        TEST_FINISHED();
+END_CASE
+]]></ST>
+      </Implementation>
+    </Method>
+  </POU>
+</TcPlcObject>

@@ -8,6 +8,7 @@ VAR
     fb_MiscStatesErrorFFO_Test: FB_MiscStatesErrorFFO_Test;
     fb_MotionBPTM_Test: FB_MotionBPTM_Test;
     fb_MotionClearAsserts_Test: FB_MotionClearAsserts_Test;
+    fb_MotionStageSetAndMoveHelper_Test: FB_MotionStageSetAndMoveHelper_Test;
     fb_MotionReadPMPSDBND_Test: FB_MotionReadPMPSDBND_Test;
     fbMotionVirtualFrameTest: FB_MotionVirtualFrame_Test;
     fb_TestHelperSetAndMove_Test: FB_TestHelperSetAndMove_Test;
