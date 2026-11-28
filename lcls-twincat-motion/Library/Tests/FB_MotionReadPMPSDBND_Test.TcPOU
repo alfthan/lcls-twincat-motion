@@ -13,6 +13,10 @@
     If more than one state at the index has the same lookup key, use that key.
     If states at the same index have different keys, that's an error and a fast fault.
     If states at different indices have the same keys, that's an error and a fast fault.
+
+    We also check that both asynchronous waits in the read are bounded by tReadTimeout:
+    a read that never completes must abandon the request, count the read as failed (bError),
+    latch bReadTimeout, and raise a fast fault. A later successful read clears the timeout.
 *)
 VAR
     astCorrectStates: ARRAY[1..GeneralConstants.MAX_STATES] OF ST_PositionState;
@@ -44,6 +48,8 @@ TestNonsense();
 TestDupe();
 TestBackfill();
 TestHalfFull();
+TestReadTimeout();
+TestFileReaderTimeout();
 ]]></ST>
     </Implementation>
     <Method Name="TestBackfill" Id="{6760dcd8-2b9b-46e0-8c98-6abb91b3d805}">
@@ -290,6 +296,173 @@ FOR nIter := 1 TO GeneralConstants.MAX_STATES DO
         Message:=CONCAT('Output did not have the correct position state: ', UINT_TO_STRING(nIter)),
     );
 END_FOR
+
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="TestReadTimeout" Id="{8b1e6c34-5d2f-4a77-b0c9-2e4a7f9d3c58}">
+      <Declaration><![CDATA[METHOD TestReadTimeout
+(*
+    A read that never finishes must not be waited on forever.
+    With a zero-length timeout the watchdog expires on the first cycle of the read:
+    the request is abandoned, the read is counted as failed, the timeout is latched,
+    and a fast fault is raised. A later good read clears the timeout again.
+*)
+VAR_INST
+    fbRead: FB_MotionReadPMPSDBND;
+    astPositionState: ARRAY[1..MotionConstants.MAX_STATE_MOTORS] OF ARRAY[1..GeneralConstants.MAX_STATES] OF ST_PositionState;
+    fbFFHWO: FB_HardwareFFOutput := (bAutoReset := TRUE);
+    jsonHelper: FB_PMPSJsonTestHelper;
+    astBeam: ARRAY[0..GeneralConstants.MAX_STATES] OF ST_DbStateParams;
+    nIter: DINT;
+END_VAR
+]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[
+TEST('TestReadTimeout');
+
+astPositionState[1] := astCorrectStates;
+
+// Request a read that cannot finish in T#0s: the decoder has not even started decoding yet.
+FOR nIter := 1 TO 5 DO
+    fbRead(
+        astPositionState:=astPositionState,
+        fbFFHWO:=fbFFHWO,
+        sTransitionKey:='State0',
+        sDeviceName:='TestReadTimeout',
+        bReadNow:=(nIter = 1),
+        tReadTimeout:=T#0s,
+    );
+END_FOR
+
+AssertTrue(
+    fbRead.bError,
+    'A timed out read should count as a failed read',
+);
+AssertTrue(
+    fbRead.bReadTimeout,
+    'The read timeout should be latched',
+);
+AssertFalse(
+    fbRead.bReadPmpsDb,
+    'The timed out read request should have been abandoned',
+);
+AssertFalse(
+    fbRead.bFirstReadDone,
+    'A timed out read should not count as a completed read',
+);
+
+// The timeout is reported through an explicit fast fault description
+// (the first fault in this FB is the state key check, the second is the read timeout)
+AssertEquals_STRING(
+    Expected:='PMPS data read timed out, the PMPS database could not be loaded in time',
+    Actual:=fbFFHWO.astFF[2].Info.Desc,
+    Message:='The read timeout should be registered with an explicit fast fault message',
+);
+
+// Fill the global PMPS json doc so that a later read can actually succeed
+FOR nIter := 0 TO GeneralConstants.MAX_STATES DO
+    astBeam[nIter].sPmpsState := CONCAT('State', DINT_TO_STRING(nIter));
+END_FOR
+jsonHelper(
+    astBeamParams:=astBeam,
+    bExecute:=TRUE,
+    sDevName:='TestReadTimeout',
+);
+
+// A successful read clears the timeout and the error output
+FOR nIter := 1 TO 20 DO
+    fbRead(
+        astPositionState:=astPositionState,
+        fbFFHWO:=fbFFHWO,
+        sTransitionKey:='State0',
+        sDeviceName:='TestReadTimeout',
+        bReadNow:=(nIter = 1),
+    );
+END_FOR
+
+AssertTrue(
+    fbRead.bFirstReadDone,
+    'The good read should have completed',
+);
+AssertFalse(
+    fbRead.bReadTimeout,
+    'A successful read should clear the latched timeout',
+);
+AssertFalse(
+    fbRead.bError,
+    'A successful read should clear the error output',
+);
+
+TEST_FINISHED();]]></ST>
+      </Implementation>
+    </Method>
+    <Method Name="TestFileReaderTimeout" Id="{c47a2f19-83b6-4d2e-9f51-6b0d8e2a71c4}">
+      <Declaration><![CDATA[METHOD TestFileReaderTimeout
+(*
+    If the global PMPS file reader stays busy, bFirstReadDone never becomes TRUE and the
+    motion FB would run on stale/empty lookups forever. Start a real file read that cannot
+    succeed so that the reader is busy, then check that the watchdog fires instead of waiting.
+*)
+VAR_INST
+    fbRead: FB_MotionReadPMPSDBND;
+    astPositionState: ARRAY[1..MotionConstants.MAX_STATE_MOTORS] OF ARRAY[1..GeneralConstants.MAX_STATES] OF ST_PositionState;
+    fbFFHWO: FB_HardwareFFOutput := (bAutoReset := TRUE);
+    nIter: DINT;
+END_VAR
+]]></Declaration>
+      <Implementation>
+        <ST><![CDATA[
+TEST('TestFileReaderTimeout');
+
+astPositionState[1] := astCorrectStates;
+
+// Put the global file reader into the busy state (a file that cannot be opened stays busy
+// for at least this cycle, which is all the watchdog needs to see).
+MOTION_GVL.fbPmpsFileReader(
+    bExecute:=TRUE,
+    sPLCName:='TestFileReaderTimeout',
+    sSrcPathName:='C:\this_file_does_not_exist.json',
+    io_fbFFHWO:=fbFFHWO,
+);
+AssertTrue(
+    MOTION_GVL.fbPmpsFileReader.bBusy,
+    'The global file reader should be busy',
+);
+
+FOR nIter := 1 TO 5 DO
+    fbRead(
+        astPositionState:=astPositionState,
+        fbFFHWO:=fbFFHWO,
+        sTransitionKey:='State0',
+        sDeviceName:='TestFileReaderTimeout',
+        tReadTimeout:=T#0s,
+    );
+END_FOR
+
+AssertTrue(
+    fbRead.bError,
+    'A file reader timeout should count as a failed read',
+);
+AssertTrue(
+    fbRead.bReadTimeout,
+    'The file reader timeout should be latched',
+);
+AssertFalse(
+    fbRead.bFirstReadDone,
+    'A timed out read should not count as a completed read',
+);
+
+// Let the file reader finish so the global reader is not left busy for the other tests
+FOR nIter := 1 TO 10 DO
+    MOTION_GVL.fbPmpsFileReader(
+        io_fbFFHWO:=fbFFHWO,
+    );
+END_FOR
+AssertFalse(
+    MOTION_GVL.fbPmpsFileReader.bBusy,
+    'The global file reader should be idle again',
+);
 
 TEST_FINISHED();]]></ST>
       </Implementation>
