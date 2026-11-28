@@ -2,29 +2,114 @@
 <TcPlcObject Version="1.1.0.1">
   <POU Name="FB_EncSaveRestore" Id="{7f38772f-c9da-4f49-aee1-95cd4af3fbdf}" SpecialFunc="None">
     <Declaration><![CDATA[FUNCTION_BLOCK FB_EncSaveRestore
+(*
+    FB_EncSaveRestore
+
+    Purpose:
+        Keep the position of an incremental (non-absolute) encoder across a PLC
+        restart. The last good position is saved to persistent storage while the
+        block is enabled, and the first time it is enabled after a restart that
+        position is written back to the axis with MC_SetPosition, so the NC axis
+        resumes agreeing with the hardware instead of starting from an arbitrary
+        position.
+
+    Usage:
+        Call once per cycle from FB_MotionStage, for stages whose encoder is not
+        absolute:
+            fbSaveRestore(
+                stMotionStage:=stMotionStage,
+                bEnable:=stMotionStage.nHomingMode <> E_EpicsHomeCmd.NONE);
+        An absolute encoder (nHomingMode = NONE) already reports its true position
+        after a power cycle, so FB_MotionStage disables the block for it: restoring
+        a stale value would make the axis lie about where it is.
+
+    Objectives:
+        - Restore once, at startup: the first enabled scan with bSaved TRUE starts
+          one MC_SetPosition, and the load is released as soon as that block
+          finishes, either with Done or with Error (the error path retries).
+        - Never save an untrustworthy position: no save is taken while a restore is
+          pending or waiting to retry, and no save is taken while stMotionStage
+          reports an NC encoder error (error ID 16#4400..16#44FF), because the
+          reported actual position may be invalid.
+        - Recover from a failed restore without flapping: at most nMaxRetries
+          attempts, each spaced by tRetryDelay, and only after the last one is a
+          fault published on stMotionStage (bError, nErrorId, sCustomErrorMessage).
+        - Set the position without tripping a following error: MC_SetPosition runs
+          with Options.ClearPositionLag := TRUE, so the jump from the NC position
+          to the saved one is not reported as a position lag fault.
+
+    Units:
+        fPosition is in the engineering units (EGU) of the NC axis scaling, the
+        same units as stMotionStage.stAxisStatus.fActPosition, which is where it is
+        read from. Because the raw EGU value is stored, changing the axis EGU
+        scaling between a save and a restore makes the restored position wrong.
+
+    Notes:
+        bSaved and fPosition are declared in VAR PERSISTENT so they survive the
+        restart. Both must also be included in the project's persistent-data
+        configuration, or the restore has nothing to load and bSaved stays FALSE.
+
+    History:
+        2020-11-05  Zachary Lentz   First pass at homing and position saving.
+        2020-11-10  Zachary Lentz   Do not save while an encoder error is present;
+                                    made a failed MC_SetPosition a user-facing
+                                    error.
+        2021-10-07  Zachary Lentz   Added the retry loop that fixes the
+                                    save/restore race condition.
+        2023-03-15  Zachary Lentz   DUT_MotionStage renamed to ST_MotionStage.
+        2026-11-28  taio-generic-0  Documented the POU header and every declaration
+                                    (audit finding #171); no functional change.
+*)
 VAR_IN_OUT
+    // The motion stage owning the axis to save and restore. Reads Axis (the NC
+    // axis handed to MC_SetPosition), stAxisStatus.fActPosition (EGU) as the value
+    // to save, and bError/nErrorId to detect the 0x44nn encoder errors; writes
+    // bError, nErrorId and sCustomErrorMessage when the restore gives up.
     stMotionStage: ST_MotionStage;
 END_VAR
 VAR_INPUT
+    // Set to TRUE to enable save/restore. The first enabled scan loads the saved
+    // position if there is one; every enabled scan after that saves the current
+    // position. While FALSE the block does nothing at all, so a stage with an
+    // absolute encoder can simply leave it disabled.
     bEnable: BOOL;
 END_VAR
 VAR_OUTPUT
 END_VAR
 VAR
+    // Writes the saved position back to the axis; retried on error.
     fbSetPos: MC_SetPosition;
+    // Unused legacy timer: the retry delay is timed by tonRetry below.
     timer: TON;
+    // First-enabled-scan latch: TRUE once bEnable has been seen, which arms the
+    // single initial load from the persistent values.
     bInit: BOOL;
+    // TRUE while a restore is outstanding. Set from bSaved on the first enabled
+    // scan, set again after each retry delay, and cleared when MC_SetPosition
+    // finishes or faults; while TRUE no new position is saved.
     bLoad: BOOL;
+    // ErrorID of the last failed MC_SetPosition, held so it can still be reported
+    // after the block clears it when Execute drops.
     nLatchError: UDINT;
+    // TRUE while stMotionStage reports an NC encoder error in 16#4400..16#44FF;
+    // no position is saved while it is TRUE.
     bEncError: BOOL;
+    // Delay between restore attempts.
     tRetryDelay: TIME := T#1s;
+    // Number of restore attempts allowed before the fault is published.
     nMaxRetries: UINT := 10;
+    // Restore attempts made so far.
     nCurrTries: UINT := 0;
+    // TRUE while waiting out tRetryDelay before the next restore attempt.
     bWaitRetry: BOOL;
+    // Times the delay between restore attempts.
     tonRetry: TON;
 END_VAR
 VAR PERSISTENT
+    // TRUE once a position has been saved at least once; on the first enabled scan
+    // after a restart it says whether there is anything to restore.
     bSaved: BOOL;
+    // Last saved axis position, in EGU of the NC axis scaling (see Units above).
     fPosition: LREAL;
 END_VAR
 ]]></Declaration>
