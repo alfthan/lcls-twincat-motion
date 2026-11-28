@@ -5,6 +5,8 @@
 FUNCTION_BLOCK FB_WriteStepModeParameters
 VAR_INPUT
     bEnable : BOOL;
+    // Rising edge only: clears the latched SDO fault and restarts the sequence.
+    bErrorAcknowledge : BOOL;
 END_VAR
 VAR_IN_OUT
     stDS402Drive         : ST_DS402Drive;
@@ -58,7 +60,8 @@ VAR
     tonStartUp : TON;
     nJogParamStep : (IDLE := 0, STEPS := 1, AMP := 2, FREQ := 3, DONE := 10, ERROR := -1) := IDLE;
     bForceSequentialSDOs : BOOL := FALSE;
-    bErrorAcknowledge: BOOL;
+    {attribute 'hide'}
+    rtErrorAcknowledge : R_TRIG;
 END_VAR
 ]]></Declaration>
     <Implementation>
@@ -66,6 +69,19 @@ END_VAR
     OR NOT __ISVALIDREF(stMotionStage)
     OR NOT __ISVALIDREF(stMCS2ChanParameter) THEN
     RETURN;
+END_IF
+
+// Tick the acknowledge edge detector every cycle, outside the bEnable gate, so a
+// deliberate reset is never missed and the edge is consumed exactly once.
+rtErrorAcknowledge(CLK := bErrorAcknowledge);
+
+// Clear the latched fault and restart the sequence on the RISING EDGE of
+// bErrorAcknowledge only. A held-high acknowledge therefore cannot silently
+// auto-reset a fault raised later without a fresh acknowledge.
+IF nJogParamStep = ERROR AND rtErrorAcknowledge.Q THEN
+    nJogParamStep          := IDLE;
+    stMotionStage.bError   := FALSE;
+    stMotionStage.nErrorId := 0;
 END_IF
 
 IF bEnable THEN
@@ -77,13 +93,6 @@ IF bEnable THEN
     // Reset sequence if startup timer hasn't fired and not forcing sequential SDOs
     IF NOT tonStartUp.Q AND nJogParamStep <> IDLE AND NOT bForceSequentialSDOs THEN
         nJogParamStep := IDLE;
-    END_IF
-
-    // Acknowledge error and restart sequence
-    IF nJogParamStep = ERROR AND bErrorAcknowledge THEN
-        nJogParamStep          := IDLE;
-        stMotionStage.bError   := FALSE;
-        stMotionStage.nErrorId := 0;
     END_IF
 
     ScaleStepModeParams();
