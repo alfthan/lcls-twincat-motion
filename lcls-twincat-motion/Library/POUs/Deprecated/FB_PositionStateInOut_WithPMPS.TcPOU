@@ -4,10 +4,26 @@
     <Declaration><![CDATA[{attribute 'obsolete' := 'Use FB_PositionStatePMPS1D_InOut instead'}
 FUNCTION_BLOCK FB_PositionStateInOut_WithPMPS EXTENDS FB_PositionStateBase_WithPMPS
 (*
-    Example usage of FB_PositionStateBase_WithPMPS for a simple IN/OUT axis. See NOTE: comments.
-    Also usable as a drop-in for these cases (no need to roll your own in/out)
+    Purpose
+        Example usage of FB_PositionStateBase_WithPMPS for a simple IN/OUT axis, and a drop-in
+        for these cases (no need to roll your own in/out).
+        This is the PMPS version. Note that the only difference is that we extend the _WithPMPS FB.
+        Deprecated: use FB_PositionStatePMPS1D_InOut instead.
 
-    This is the PMPS version. Note that the only difference is that we extend the _WithPMPS FB.
+    Usage
+        Instantiate in place of FB_PositionStatePMPS1D_InOut in legacy projects.
+        Wire enumSet (command) and enumGet (readback), copying their pytmc pragmas exactly.
+        Do not pragma stIn/stOut; the manager handles those. See the NOTE: comments below.
+
+    Objectives
+        - Keep older projects compiling while they migrate to FB_PositionStatePMPS1D_InOut.
+        - Show the minimal configuration of an IN/OUT axis on the PMPS state base block.
+
+    History
+        2020-07-10  Zachary Lentz    Created during the position-state rework.
+        2022-01-12  K Lauer          Set stIn/stOut names for in/out state positioners.
+        2023-03-15  Zachary Lentz    Marked deprecated; kept for backwards compatibility.
+        2026-11-28  AI agent (#432)  Added purpose, usage, objectives and history header.
 *)
 VAR_INPUT
     // The enum position to move to
