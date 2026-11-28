@@ -7,16 +7,77 @@
     - Uses overridden Position Holding timer.
     - power enable mode must be 'DURING_MOTION' for closed-loop (CSP) control.
     - Set bServo PV to true for closed-loop, clear for open-loop (step mode).
+
+    Purpose:
+        Own the DS402 life cycle of one SmarAct MCS2 channel: power enable,
+        closed-loop (CSP) moves through the NC, open-loop STEP_MODE moves, homing
+        and calibration. Publish position, velocity, acceleration, following
+        error and status back to the caller and to EPICS.
+
+    Objectives:
+        - Start a requested command (MOVE_ABSOLUTE, JOG, HOME, CALIBRATE) only on
+          the rising edge of bExecute, and drop it when bExecute falls.
+        - Release a command only once the drive is in the matching DS402
+          operating mode and bAllEnable, bSafetyReady, the direction enables and
+          the axis permits are all TRUE.
+        - Stop and report a move that the drive ends on an internal limit, and
+          disable only the offending direction so the axis can reverse off it.
+        - Keep the following-error-monitor disable around homing and calibration
+          bounded (500 ms) so a missing NC parameter write cannot hang the
+          routine.
+        - Save the last position across power cycles (unless the encoder reports
+          an error) and restore it once at startup.
+        - Latch bError/nErrorId until an explicit reset.
+
+    Usage:
+        - Instantiate once per MCS2 channel and call it every cycle. Wire
+          stMotionStage, stChanParams and stDS402Drive on the first call.
+        - Set eModule to the 1-based channel number; the 'call_after_init'
+          attribute applies it in PostInit(), which derives the per-channel SDO
+          indices.
+        - stChanParams.bEnableHardwareOps FALSE keeps the block in simulation
+          mode, for testing without hardware.
+
+    History:
+        2025-10-28  Yann Stephen Mandza  First version of the DS402/MCS2 rework:
+                                         drive manager, step mode, homing and
+                                         calibration split into their own FBs.
+        2026-03-04  Yann Stephen Mandza  Simulation mode and dedicated error
+                                         reporting FB.
+        2026-05-19  Yann Stephen Mandza  Channel-parameter writers consolidated
+                                         into one sequential writer block.
+        2026-08-11  Yann Stephen Mandza  Drive returned to closed loop after a
+                                         successful home/calibration.
+        2026-09-01  Yann Stephen Mandza  Home/calibrate wait for the NC
+                                         position-lag disable (500 ms cap).
+        2026-09-04  Yann Stephen Mandza  Fix random drive-disable after manual
+                                         moves.
+        2026-11-28  Scirix Agent         Add objectives/usage/history and inline
+                                         comments with units on the interface
+                                         members and index constants.
+
+    Author / date:
+        Yann Stephen Mandza / 2025-10-28 (first version in this repository)
 *)
 {attribute 'call_after_init'}
 FUNCTION_BLOCK FB_MotionStageMCS2
 
 VAR
+    // Stage interface, owned by the caller: commands (bExecute with nCommand,
+    // fPosition, fVelocity, fAcceleration, fDeceleration), the NC axis handle and
+    // the status/error fields this block writes back. Positions are in axis
+    // engineering units (EU), velocity in EU/s, acceleration in EU/s^2.
     {attribute 'no_copy'}
     stMotionStage		: REFERENCE TO ST_MotionStage;
+    // MCS2 channel interface, owned by the caller: EPICS tunables (step count and
+    // frequency, hold time in ms, homing/step/calibration options), the drive
+    // channel parameters read back into it, and the per-channel SDO indices
+    // PostInit() derives from eModule.
     {attribute 'no_copy'}
     stChanParams       : REFERENCE TO ST_MCS2ChanParameter;
     // Hardware I/O
+    // DS402 cyclic I/O image of the drive: control word, mode of operation,
+    // status word and the cyclic PDO values exchanged with the hardware.
     {attribute 'pytmc' := 'pv:'}
     stDS402Drive		: ST_DS402Drive;
 
@@ -28,6 +89,8 @@ VAR
     fbWriteParameters 	: FB_WriteChanParameters;
     fbReadDriveCodes 	: FB_ReadDriveCodes;
 
+    // 1-based MCS2 channel (module) number, set by the caller before PostInit()
+    // runs; PostInit() derives the per-channel SDO indices from it.
     {attribute 'hide'}
     eModule                 : E_Module;
     {attribute 'hide'}
@@ -44,10 +107,18 @@ VAR
     fbMcWriteParameter      : MC_WriteParameter;
     {attribute 'hide'}
     fbMcReadParams          : MC_ReadParameterSet;
+    // Value handed to MC_WriteParameter (AxisEnPositionLagMonitoring: 1 = enable,
+    // 0 = disable). Unitless, it is the raw parameter value.
     {attribute 'hide'}
     fParameterValue : LREAL;
+    // Measured position in axis engineering units (EU): NC actual position in
+    // closed loop, scaled encoder value in open loop.
     fMeasuredPos: LREAL;
+    // Measured velocity in EU/s. Open loop has no velocity measurement, so the
+    // commanded velocity is republished instead.
     fMeasuredVelo: LREAL;
+    // Measured acceleration/deceleration in EU/s^2. Open loop republishes the
+    // commanded value.
     fMeasuredAcc: LREAL;
     bLastHoltTimeOut : BOOL;
     bRestoreWaitRetry   : BOOL;
@@ -134,84 +205,147 @@ VAR
 END_VAR
 
 VAR CONSTANT
+    // Per-channel SDO index bases. Every MCS2 channel exposes the same objects
+    // at a fixed stride, so a parameter index is
+    //     <object base below> + (eModule - 1) * nChanOfsBase
+    // (applied in PostInit). 0x6000-0x7FFF are standard CiA 402 objects,
+    // 0x2000-0x20FF are SmarAct MCS2 manufacturer objects.
+    // Soft limit (SmarAct 0x200E). Limit value in positioner units (EU).
     {attribute 'hide'}
-    nChanSoftLimitBase       : WORD := 16#200E;
+    nChanSoftLimitBase          : WORD := 16#200E;
+    // Home offset (CiA 402 0x607C): position of the machine zero relative
+    // to the drive zero, in position units (EU).
     {attribute 'hide'}
-    nChanHomeOffsetBase      : WORD := 16#607C;
+    nChanHomeOffsetBase         : WORD := 16#607C;
+    // Homing method (CiA 402 0x6098). Method code, no units; the method in
+    // use comes from stChanParams.eHomeMode.
     {attribute 'hide'}
-    nChanHomeMethodBase      : WORD := 16#6098;
+    nChanHomeMethodBase         : WORD := 16#6098;
+    // Homing speeds (CiA 402 0x6099). Subindex 1 = search for the switch,
+    // subindex 2 = search for the zero mark; speed in position units/s.
     {attribute 'hide'}
-    nChanHomingSpeedBase     : WORD := 16#6099;
+    nChanHomingSpeedBase        : WORD := 16#6099;
+    // Homing acceleration (CiA 402 0x609A), in position units/s^2.
     {attribute 'hide'}
-    nChanhomingAccBase       : WORD := 16#609A;
+    nChanhomingAccBase          : WORD := 16#609A;
+    // Error code (CiA 402 0x603F). Drive error number, no units; decoded by
+    // F_MCS2ErrorCodeLookup into sMCS2ErrorMessage.
     {attribute 'hide'}
-    nChanErrorCodeBase       : WORD := 16#603F;
+    nChanErrorCodeBase          : WORD := 16#603F;
+    // Following error window (CiA 402 0x6065), in position units (EU).
     {attribute 'hide'}
-    nChanFErrWinBase         : WORD := 16#6065;
+    nChanFErrWinBase            : WORD := 16#6065;
+    // Index stride per channel: index = <object base> + (eModule - 1) *
+    // nChanOfsBase. Same stride for SmartAct MCS2 and E-727.
     {attribute 'hide'}
-    nChanOfsBase             : WORD := 16#800;      // For SmartAct MCS2 and E-727
+    nChanOfsBase                : WORD := 16#800;
+    // Drive error code "motor encoder defective" (0x7300), used to suppress
+    // saving/restoring a position the encoder cannot vouch for.
     {attribute 'hide'}
-    nChanEncErrorCode        : WORD := 16#7300;     // Motor encoder defective code (for save/restore)
+    nChanEncErrorCode           : WORD := 16#7300;
+    // Alias of nChanSoftLimitBase for the same object (0x200E). Not
+    // referenced by this POU; prefer nChanSoftLimitBase.
     {attribute 'hide'}
-    nChanSoftLimBase         : WORD := 16#200E;
+    nChanSoftLimBase            : WORD := 16#200E;
+    // Open-loop step count (SmarAct 0x2022): steps per jog move
+    // (PV STEP_COUNT).
     {attribute 'hide'}
-    nChanOlStepBase          : WORD := 16#2022;
+    nChanOlStepBase             : WORD := 16#2022;
+    // Open-loop step amplitude (SmarAct 0x2023): V per step
+    // (PV STEP_VOLTAGE).
     {attribute 'hide'}
-    nChanOlStepAmpBase       : WORD := 16#2023;
+    nChanOlStepAmpBase          : WORD := 16#2023;
+    // Open-loop step frequency (SmarAct 0x2024), in Hz (PV STEP_FREQ).
     {attribute 'hide'}
-    nChanOlStepFreqBase      : WORD := 16#2024;
+    nChanOlStepFreqBase         : WORD := 16#2024;
+    // Maximum closed-loop frequency (SmarAct 0x2001), in Hz (PV MAX_CLF).
     {attribute 'hide'}
-    nChanMaxCloseLoopFreqBase: WORD := 16#2001;
+    nChanMaxCloseLoopFreqBase   : WORD := 16#2001;
+    // Positioner type reported by the drive (SmarAct 0x2000), drive
+    // enumeration, no units.
     {attribute 'hide'}
-    nChanPositionerTypeBase  : WORD := 16#2000;
+    nChanPositionerTypeBase     : WORD := 16#2000;
+    // Calibration options bit field (SmarAct 0x2004); bit meanings in
+    // stChanParams bCal* members.
     {attribute 'hide'}
-    nCHanCalibrationOptBase  : WORD := 16#2004;
+    nCHanCalibrationOptBase     : WORD := 16#2004;
+    // Sensor power mode (SmarAct 0x2007), drive enumeration.
     {attribute 'hide'}
-    nChanSensorPowerModeBase : WORD := 16#2007;
+    nChanSensorPowerModeBase    : WORD := 16#2007;
+    // Referencing options bit field (SmarAct 0x200B); bit meanings in
+    // stChanParams bRef* members.
     {attribute 'hide'}
-    nChanReferencingOptBase  : WORD := 16#200B;
+    nChanReferencingOptBase     : WORD := 16#200B;
+    // Reference type (SmarAct 0x200A), drive enumeration.
     {attribute 'hide'}
-    nChanReferenceTypeBase   : WORD := 16#200A;
+    nChanReferenceTypeBase      : WORD := 16#200A;
+    // Safe direction (SmarAct 0x200C): 0 = forward, 1 = backward. Written
+    // in Pre-Op.
     {attribute 'hide'}
-    nChanSafeDirBase         : WORD := 16#200C;
+    nChanSafeDirBase            : WORD := 16#200C;
+    // Motor load characteristic (SmarAct 0x200D), drive enumeration.
     {attribute 'hide'}
-    nChanMotorLoadBase       : WORD := 16#200D;
+    nChanMotorLoadBase          : WORD := 16#200D;
+    // Channel type (SmarAct 0x200F), drive enumeration.
     {attribute 'hide'}
-    nChannelTypeBase         : WORD := 16#200F;
+    nChannelTypeBase            : WORD := 16#200F;
+    // Channel state bit field (SmarAct 0x2025): is-referenced, limit
+    // active, movement-failed and other status bits.
     {attribute 'hide'}
-    nChannelStateBase        : WORD := 16#2025;
+    nChannelStateBase           : WORD := 16#2025;
+    // Logical scale offset (SmarAct 0x2008), in position units (EU).
     {attribute 'hide'}
-    nChanLogicalScaleOffsetBase  : WORD := 16#2008;
+    nChanLogicalScaleOffsetBase : WORD := 16#2008;
+    // Logical scale inversion flag (SmarAct 0x2009): 0 = not inverted, 1 =
+    // inverted.
     {attribute 'hide'}
-    nChanLogicalScaleInvBase     : WORD := 16#2009;
+    nChanLogicalScaleInvBase    : WORD := 16#2009;
+    // Channel temperature (SmarAct 0x2026), in degC as reported by the
+    // drive.
     {attribute 'hide'}
-    nChanChannelTempBase         : WORD := 16#2026;
+    nChanChannelTempBase        : WORD := 16#2026;
+    // Movement type (SmarAct 0x2003), drive enumeration (linear/rotary).
     {attribute 'hide'}
-    nChanMovementTypeBase        : WORD := 16#2003;
+    nChanMovementTypeBase       : WORD := 16#2003;
+    // Base unit (SmarAct 0x2005), drive enumeration (e.g. m, deg).
     {attribute 'hide'}
-    nChanBaseUnitBase            : WORD := 16#2005;
+    nChanBaseUnitBase           : WORD := 16#2005;
+    // Base resolution (SmarAct 0x2006): encoder counts per base unit.
     {attribute 'hide'}
-    nChanBaseResolutionBase      : WORD := 16#2006;
+    nChanBaseResolutionBase     : WORD := 16#2006;
+    // Distance code inversion (SmarAct 0x2029): flips the incremental
+    // encoder counting direction.
     {attribute 'hide'}
-    nChanDistCodeInvBase         : WORD := 16#2029;
+    nChanDistCodeInvBase        : WORD := 16#2029;
+    // Positioner control options bit field (SmarAct 0x2027).
     {attribute 'hide'}
-    nChanPositionerCtrlOptBase   : WORD := 16#2027;
+    nChanPositionerCtrlOptBase  : WORD := 16#2027;
+    // Actuator mode (SmarAct 0x2028), drive enumeration.
     {attribute 'hide'}
-    nChanActuatorModeBase        : WORD := 16#2028;
+    nChanActuatorModeBase       : WORD := 16#2028;
+    // Motor load protection threshold (SmarAct 0x202B); threshold value in
+    // the drive's own encoding.
     {attribute 'hide'}
-    nChanMotorLoadProtBase       : WORD := 16#202B;
+    nChanMotorLoadProtBase      : WORD := 16#202B;
+    // Diagnostic closed-loop frequency (SmarAct 0x202A), in Hz (subindex 1
+    // is max, subindex 2 is average).
     {attribute 'hide'}
-    nChanDiagClfBase             : WORD := 16#202A;
+    nChanDiagClfBase            : WORD := 16#202A;
     // Held as constants so the retract check below cannot drift from the text posted.
     {attribute 'hide'}
-    sMsgPosLimit                 : STRING := 'Cannot move past positive limit.';
+    sMsgPosLimit                : STRING := 'Cannot move past positive limit.';
     {attribute 'hide'}
-    sMsgNegLimit                 : STRING := 'Cannot move past Negative limit.';
+    sMsgNegLimit                : STRING := 'Cannot move past Negative limit.';
 END_VAR
 
 VAR PERSISTENT
+    // TRUE once a position has been written to the persistent area; gates the
+    // one-shot restore at startup.
     bSaved                   : BOOL;
+    // Last position saved before power down, in axis engineering units (EU).
     fSavedPosition           : LREAL;
+    // Last known free directions, used to infer which way the axis may recover
+    // when the drive boots with an internal limit already active.
     bLastPositiveDirection   : BOOL;
     bLastNegativeDirection   : BOOL;
 END_VAR]]></Declaration>
