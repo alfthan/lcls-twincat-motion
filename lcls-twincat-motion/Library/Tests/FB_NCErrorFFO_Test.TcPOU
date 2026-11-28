@@ -101,6 +101,12 @@ END_CASE
 
 // Wait for the fault or the timeout, then check everything
 IF tonTimer.Q OR (NOT fbFFHWO.q_xFastFaultOut AND stMotionStage.nErrorID = 16#4467) THEN
+    // Report the causer fault first: if one of its waits expired, its own
+    // message says which wait failed, unlike the generic test timeout below.
+    AssertFalse(
+        fbCauseNCError.bError,
+        'NC error causer faulted, see fbCauseNCError.sErrorMessage',
+    );
     AssertFalse(
         tonTimer.Q,
         'Timeout in test',
@@ -172,6 +178,12 @@ END_CASE
 
 // Wait for the fault or the timeout, then check everything
 IF tonTimer.Q OR (NOT fbFFHWO.q_xFastFaultOut AND stMotionStage.nErrorId = 16#4550) THEN
+    // Report the causer fault first: if one of its waits expired, its own
+    // message says which wait failed, unlike the generic test timeout below.
+    AssertFalse(
+        fbCauseNCError.bError,
+        'NC error causer faulted, see fbCauseNCError.sErrorMessage',
+    );
     AssertFalse(
         tonTimer.Q,
         'Timeout in test',

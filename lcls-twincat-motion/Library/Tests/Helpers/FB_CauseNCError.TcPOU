@@ -5,54 +5,193 @@
 (*
     Simulate an NC error.
     This will look like a real NC error for everyone, including TwinCAT itself.
+
+    The request is a non-blocking state machine, started by a rising edge on bExecute:
+        READ  - MC_ReadDriveAddress fetches the drive address into Axis.DriveAddress.
+        WRITE - ADSWRITE writes nErrorCode to the NC over ADS: port 501,
+                index group 16#4200 + NcDriveId, index offset 16#0019.
+    bDone rises once the ADS write has completed.
+
+    Both waits are supervised by tonStep and bounded by tTimeout. If the drive
+    address read or the ADS write does not complete in time, the sequence is
+    abandoned and bError is latched together with an explicit sErrorMessage and
+    the numeric nErrorId. A timeout here means the NC or the ADS port did not
+    answer, which is the failure this helper must report rather than wait out.
+
+    bError is latched for as long as bExecute is held: dropping bExecute does
+    not dismiss it, and the next rising edge of bExecute starts a fresh attempt.
+    bBusy is TRUE from the rising edge until bDone or bError.
+
+    Usage: hold bExecute TRUE and watch for bDone or bError. The caller keeps
+    its own overall test timeout; this block only bounds the waits it issues.
+
+    History:
+    2026-11-28, iterate on audit finding 218: bound both waits with tTimeout
+    and add the bError/nErrorId/sErrorMessage/tElapsed diagnostics.
 *)
 VAR_IN_OUT
+    // The axis to cause the NC error on. Its drive address is read first.
     Axis: AXIS_REF;
 END_VAR
 VAR_INPUT
+    // Begin on the rising edge, abandon the sequence on the falling edge.
     bExecute: BOOL;
+    // The NC error code to write into the drive error slot.
     nErrorCode: UDINT;
+    // Maximum time allowed for each of the two waits.
+    tTimeout: TIME := T#2S;
 END_VAR
 VAR_OUTPUT
+    // TRUE from the rising edge of bExecute until bDone or bError.
     bBusy: BOOL;
+    // TRUE once the ADS write of nErrorCode has completed.
     bDone: BOOL;
+    // Latched: a wait expired, or the NC/ADS layer reported an error.
+    bError: BOOL;
+    // Numeric code behind bError: the ADS error id or the NC error id (0 on timeout).
+    nErrorId: UDINT;
+    // Explicit description of the fault behind bError.
+    sErrorMessage: STRING;
+    // Elapsed time of the wait currently in progress.
+    tElapsed: TIME;
 END_VAR
 VAR
+    // Rising edge detector on the command input.
     rtExec: R_TRIG;
+    // Falling edge detector on the command input.
+    ftExec: F_TRIG;
+    // Writes nErrorCode into the NC drive error slot.
     adsWrite: ADSWRITE;
+    // Reads the drive address that targets the ADS write.
     mcReadDriveAddress: MC_ReadDriveAddress;
+    // Supervises whichever wait is active; reset between the two waits.
+    tonStep: TON;
+    // TRUE once the ADS write has been seen busy, so that its falling edge is
+    // taken as completion instead of the idle first cycle of the request.
+    bAdsBusySeen: BOOL;
+    // Named states of the request.
+    eStep: (
+        IDLE := 0,
+        READ := 1,
+        WRITE := 2,
+        DONE := 3,
+        ERROR := 4
+    ) := IDLE;
 END_VAR
 ]]></Declaration>
     <Implementation>
       <ST><![CDATA[
-rtExec(CLK:=bExecute);
-IF NOT bExecute THEN
-    bDone := FALSE;
-END_IF
+rtExec(CLK := bExecute);
+ftExec(CLK := bExecute);
+
+// A rising edge starts a fresh attempt. Any latched fault is cleared here, and
+// only here in the command path: dropping bExecute below does not clear it.
 IF rtExec.Q THEN
     bBusy := TRUE;
+    bDone := FALSE;
+    bError := FALSE;
+    nErrorId := 0;
+    sErrorMessage := '';
+    bAdsBusySeen := FALSE;
+    eStep := READ;
 END_IF
-IF bBusy AND NOT mcReadDriveAddress.Done THEN
-    mcReadDriveAddress(
-        Axis:=Axis,
-        Execute:=TRUE,
-        DriveAddress=>Axis.DriveAddress);
-END_IF
-IF bBusy AND mcReadDriveAddress.Done THEN
-    bBusy := TRUE;
-    adsWrite(
-        PORT:=501,
-        IDXGRP:=16#4200 + Axis.DriveAddress.NcDriveId,
-        IDXOFFS:=16#0019,
-        LEN:=SIZEOF(nErrorCode),
-        SRCADDR:=ADR(nErrorCode),
-        WRITE:=TRUE,
-        BUSY=>bBusy);
-    IF NOT bBusy THEN
-        bDone := TRUE;
-        adsWrite(WRITE:=FALSE);
+
+// Dropping bExecute abandons an in-progress attempt and retires both requests.
+// bError and its message stay latched for the caller to read.
+IF ftExec.Q THEN
+    bBusy := FALSE;
+    bDone := FALSE;
+    adsWrite(WRITE := FALSE);
+    // DriveAddress is deliberately not mapped on a reset call: the address that
+    // was read stays valid in Axis.DriveAddress for the next write.
+    mcReadDriveAddress(Axis := Axis, Execute := FALSE);
+    IF eStep <> ERROR THEN
+        eStep := IDLE;
     END_IF
 END_IF
+
+// One timer supervises whichever wait is in progress. Its elapsed time restarts
+// from zero when the sequence moves on to the next wait (tonStep(IN := FALSE)).
+tonStep(
+    IN := bExecute AND (eStep = READ OR eStep = WRITE),
+    PT := tTimeout,
+    ET => tElapsed,
+);
+
+CASE eStep OF
+    IDLE:
+        // Waiting for a new request.
+        bBusy := FALSE;
+
+    READ:
+        // Wait for the NC drive address, bounded by tTimeout.
+        mcReadDriveAddress(
+            Axis := Axis,
+            Execute := TRUE,
+            DriveAddress => Axis.DriveAddress,
+        );
+        IF mcReadDriveAddress.Error THEN
+            bError := TRUE;
+            nErrorId := mcReadDriveAddress.ErrorID;
+            sErrorMessage := 'FB_CauseNCError: MC_ReadDriveAddress failed';
+            eStep := ERROR;
+        ELSIF mcReadDriveAddress.Done THEN
+            // Retire the read before the write starts.
+            mcReadDriveAddress(Axis := Axis, Execute := FALSE);
+            // The ADS write gets a full tTimeout of its own.
+            tonStep(IN := FALSE);
+            eStep := WRITE;
+        ELSIF tonStep.Q THEN
+            bError := TRUE;
+            nErrorId := 0;
+            sErrorMessage := 'FB_CauseNCError: timeout reading the NC drive address';
+            eStep := ERROR;
+        END_IF
+
+    WRITE:
+        // Wait for the ADS write, bounded by tTimeout.
+        adsWrite(
+            PORT := 501,
+            IDXGRP := 16#4200 + Axis.DriveAddress.NcDriveId,
+            IDXOFFS := 16#0019,
+            LEN := SIZEOF(nErrorCode),
+            SRCADDR := ADR(nErrorCode),
+            WRITE := TRUE,
+        );
+        IF adsWrite.ERR THEN
+            bError := TRUE;
+            nErrorId := adsWrite.ERRID;
+            sErrorMessage := 'FB_CauseNCError: ADS write of the NC error code failed';
+            eStep := ERROR;
+        ELSIF tonStep.Q THEN
+            bError := TRUE;
+            nErrorId := 0;
+            sErrorMessage := 'FB_CauseNCError: timeout writing the NC error code over ADS (port 501)';
+            eStep := ERROR;
+        ELSIF adsWrite.BUSY THEN
+            // The request has been accepted and is in flight.
+            bAdsBusySeen := TRUE;
+        ELSIF bAdsBusySeen THEN
+            // BUSY dropped again without an ADS error: the write completed.
+            bDone := TRUE;
+            bBusy := FALSE;
+            adsWrite(WRITE := FALSE);
+            eStep := DONE;
+        END_IF
+
+    DONE:
+        // bDone is held until bExecute drops or a new request starts.
+        bBusy := FALSE;
+
+    ERROR:
+        // Retire both requests; bError is held until the next request.
+        bBusy := FALSE;
+        adsWrite(WRITE := FALSE);
+        mcReadDriveAddress(Axis := Axis, Execute := FALSE);
+
+    ELSE
+        eStep := IDLE;
+END_CASE
 ]]></ST>
     </Implementation>
   </POU>
