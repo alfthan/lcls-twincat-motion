@@ -1,12 +1,39 @@
 ﻿<?xml version="1.0" encoding="utf-8"?>
 <TcPlcObject Version="1.1.0.1">
   <DUT Name="ST_RenishawAbsEnc" Id="{6f5997cc-f148-4e63-9185-dfba8067f4f0}">
-    <Declaration><![CDATA[// Renishaw BiSS-C absolute encoder used with an EL5042
+    <Declaration><![CDATA[(*
+ST_RenishawAbsEnc | Interface to one Renishaw BiSS-C absolute encoder read through an
+EL5042 two-channel BiSS-C terminal.
+
+Purpose:
+    Bundle one absolute encoder reading with its zero reference, so every caller
+    computes "position since alignment" the same way instead of re-deriving the
+    offset locally.
+
+Usage:
+    Declare one instance per encoder channel next to the EL5042 terminal and link
+    "Count" to that channel's "Position" input (%I*). Write "Ref" once, from the
+    alignment step that records the reading at the desired zero. Consumers subtract
+    Ref from Count and compare the difference, in raw encoder counts, against
+    tolerances also expressed in counts (see FB_GantryDiffVirtualLimitSwitch).
+    For a distance in engineering units, multiply the count difference by the
+    encoder resolution (counts per revolution) and the stage lead configured in
+    the NC.
+
+Objectives:
+    - Publish the raw absolute encoder count without hidden scaling in the interface.
+    - Keep the zero reference beside the reading so gantry alignment maths is local.
+    - Reserve a slot for the EL5042 status word without changing the struct layout.
+
+History:
+    2019-07-10  A. Wallace      Initial version.
+    2026-11-28  taio-generic-0  Document each member's meaning and units; add header.
+*)
 TYPE ST_RenishawAbsEnc :
 STRUCT
-    Count AT %I*: ULINT; // Connect to encoder "Position" input
-    Status: ST_EL5042_Status; // Status struct placeholder
-    Ref: ULINT; // Encoder zero position (useful for aligned position with gantries)
+    Count AT %I*: ULINT;      // Absolute position, unit: raw encoder counts (unsigned, unscaled); link to the EL5042 "Position" input
+    Status: ST_EL5042_Status; // EL5042 channel status word, unit: none (status bits); ST_EL5042_Status is empty today, so it publishes no bits yet
+    Ref: ULINT;               // Zero reference, unit: raw encoder counts; Count - Ref is the position since zero, in counts
 END_STRUCT
 END_TYPE
 ]]></Declaration>
