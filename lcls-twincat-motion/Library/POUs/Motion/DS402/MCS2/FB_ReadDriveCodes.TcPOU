@@ -1,22 +1,84 @@
 ﻿<?xml version="1.0" encoding="utf-8"?>
 <TcPlcObject Version="1.1.0.1">
   <POU Name="FB_ReadDriveCodes" Id="{6ab55793-c2c3-4780-bb36-92684655a3d8}" SpecialFunc="None">
-    <Declaration><![CDATA[(* Read Drive error codes after a motion or fault condition occured *)
+    <Declaration><![CDATA[(*
+    Purpose:
+        Read the drive error codes after a motion or fault condition and surface
+        them on ST_MotionStage, so the IOC reports a single operator message in
+        sErrorMessage without the overlapping MCS2 and NC numeric code spaces
+        being merged into nErrorId.
+    Usage:
+        Called once per PLC cycle from FB_MotionStageMCS2 on the owning stage's
+        own structures:
+
+            fbReadDriveCodes(
+                bEnable             := stMotionStage.bAxisParamsInit AND
+                                       stChanParams.bEnableHardwareOps,
+                stDS402Drive        := stDS402Drive,
+                stMotionStage       := stMotionStage,
+                stMCS2ChanParameter := stChanParams);
+
+        The block returns immediately while any of the three references is
+        invalid, and has no outputs of its own: it writes stMotionStage.bError,
+        .nErrorId (E_LCLSMotionError.MCS2_FAULT) and .sErrorMessage, plus
+        stMCS2ChanParameter.sMCS2ErrorMessage.
+    Objectives:
+        - Decode stMCS2ChanParameter.nMCS2ErrorCode into sMCS2ErrorMessage
+          through F_MCS2ErrorCodeLookup, for PLC debug on MCS2_ERR_MSG.
+        - Promote a real-time MCS2 channel-state fault (following limit,
+          positioner overload, over-temperature, positioner fault) that the NC
+          never latched to stMotionStage.bError on the rising edge only, so a
+          latched fault neither re-latches nor blocks the caller's reset.
+        - Rebuild sErrorMessage from scratch each cycle - NC/limit layer first,
+          then the raw MCS2 code in hex - so the two number spaces stay
+          distinguishable for the operator.
+    History:
+        2026-03-04  ysmandza      Error reporting moved out of FB_MotionStage
+                                  into this dedicated block.
+        2026-08-16  Mandza        Standard message used for faults without a
+                                  code.
+        2026-08-31  Mandza        Raw MCS2 code appended to sErrorMessage.
+        2026-09-01  Mandza        Fault promotion edge-triggered so a reset is
+                                  not blocked; drive-only faults surfaced.
+        2026-10-07  ysmandza      MovementFailed dropped from the fault check.
+        2026-11-28  Scirix Agent  POU header and per-declaration comments added,
+                                  no behaviour change (audit finding #150).
+*)
 FUNCTION_BLOCK FB_ReadDriveCodes
 VAR_IN_OUT
+    // Drive PDO image of this stage's EtherCAT slave. Only the TPDO status word
+    // is read here (stDriveStatus.InternalLimitActive, which selects the
+    // NC/limit message); no drive output is written.
     stDS402Drive         : ST_DS402Drive;
+    // Stage state owned by the caller. This FB sets bError, nErrorId and
+    // sErrorMessage on it and touches nothing else.
     stMotionStage        : ST_MotionStage;
-    stMCS2ChanParameter	: ST_MCS2ChanParameter;
+    // MCS2 channel parameters of the same stage, filled in by
+    // FB_ReadChanParameters: nMCS2ErrorCode / sMCS2ErrorMessage are written and
+    // stChannelState is read for the fault-promotion bits.
+    stMCS2ChanParameter  : ST_MCS2ChanParameter;
 END_VAR
 VAR_INPUT
+    // TRUE when the axis parameters are initialised and hardware operations are
+    // permitted (stMotionStage.bAxisParamsInit AND
+    // stChanParams.bEnableHardwareOps). Gates the MCS2 fault promotion only:
+    // while FALSE no MCS2 channel-state fault is latched. The error-code decode
+    // and the sErrorMessage rebuild run regardless.
     bEnable : BOOL;
 END_VAR
 VAR
     {attribute 'hide'}
+    // Motion error logger instance. This FB reports through stMotionStage
+    // directly, so the instance is currently not called.
     fbLogError          : FB_LogMotionError;
+    // sErrorMessage being rebuilt on this cycle.
     sMsg                : STRING;
+    // 'MCS2: 0xXXXX' fragment appended to sMsg.
     sMCS2Code           : STRING;
+    // Level signal: OR of the promoted channel-state fault bits, gated by
+    // bEnable.
     bMCS2Fault          : BOOL;
+    // Rising edge of bMCS2Fault: latches the fault exactly once.
     rtMCS2Fault         : R_TRIG;
 END_VAR
 ]]></Declaration>
